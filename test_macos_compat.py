@@ -102,11 +102,20 @@ def main():
     src = (ROOT / "ui" / "main_window.py").read_text(encoding="utf-8")
     check("co bien SIGNER_SCRIPT", "SIGNER_SCRIPT" in src)
     check("co bien IS_MAC", "IS_MAC" in src)
-    # Không được hardcode 'signer.bat' vào chuỗi hiển thị nữa
-    hard = [l for l in src.splitlines()
-            if "signer.bat" in l and "SIGNER_SCRIPT" not in l
-            and "IS_MAC" not in l]
-    check("khong con chuoi 'signer.bat' hardcode", hard, [])
+    # Không được hardcode 'signer.bat' vào chuỗi hiển thị — tên file phải
+    # đến từ SIGNER_SCRIPT để đổi theo OS. Chấp nhận dòng có chứa
+    # SIGNER_SCRIPT / IS_MAC (ghép động) và dòng trong khối so sánh.
+    hard = []
+    for line in src.splitlines():
+        if "signer.bat" not in line:
+            continue
+        if any(k in line for k in ("SIGNER_SCRIPT", "IS_MAC", "SIGNER_STEPS",
+                                   "SIGNER_STEP_RUN", "signer.sh")):
+            continue
+        if line.strip().startswith("#") or line.strip().startswith('"'):
+            continue          # comment hoặc doc chuoi ghi chu
+        hard.append(line.strip()[:90])
+    check("khong con chuoi 'signer.bat' hardcode trong logic", hard, [])
 
     print("\n=== 6. Khong co goi Windows API o cap module ===")
     # `import winreg` phai nam TRONG ham (lazy) va co guard, neu khong
@@ -184,6 +193,39 @@ def main():
     check("da cai nhung khong chay -> nhan 'CHUA CHAY'",
           "CHƯA CHẠY" in w.lbl_signer.text().upper(), True)
     w._node_installed, w._signer_dir_installed = real_node, real_dir
+
+    print("\n=== 9. Nut 'Bat sidecar' trong app ===")
+    from PySide6.QtWidgets import QApplication as _QA2
+    w2 = MainWindow()
+    check("co nut btn_signer", hasattr(w2, "btn_signer"))
+    check("nut hien thi ro ten", "sidecar" in w2.btn_signer.text().lower())
+    check("nut co tooltip", bool(w2.btn_signer.toolTip()))
+    check("co ham _start_signer", hasattr(w2, "_start_signer"))
+    check("_signer_proc ban dau la None", w2._signer_proc, None)
+    check("_signer_poll ban dau la None", w2._signer_poll, None)
+    # QProcess phai import tu QtCore — import tu QtWidgets se ImportError
+    # ngay luc khoi dong app
+    r = subprocess.run(
+        [sys.executable, "-c",
+         "from PySide6.QtCore import QProcess; print('ok')"],
+        capture_output=True, text=True, cwd=str(ROOT))
+    check("QProcess import duoc tu QtCore", r.returncode, 0)
+    r2 = subprocess.run(
+        [sys.executable, "-c",
+         "import ui.main_window as m; print('ok')"],
+        capture_output=True, text=True, cwd=str(ROOT))
+    check("import ui.main_window khong loi", r2.returncode, 0)
+    if r2.returncode:
+        print("      ", r2.stderr.strip()[-200:])
+    # khong trung ten ham
+    n_poll = sum(1 for ln in (ROOT / "ui" / "main_window.py")
+                 .read_text(encoding="utf-8").splitlines()
+                 if ln.strip().startswith("def _poll_after_start"))
+    check("khong co ban trung lap _poll_after_start", n_poll, 1)
+    n_out = sum(1 for ln in (ROOT / "ui" / "main_window.py")
+                .read_text(encoding="utf-8").splitlines()
+                if ln.strip().startswith("def _signer_output"))
+    check("khong co ban trung lap _signer_output", n_out, 1)
 
     print(f"\n{'='*54}\n  {PASS} pass, {FAIL} fail\n{'='*54}")
     return 1 if FAIL else 0

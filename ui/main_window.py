@@ -7,7 +7,9 @@ import html
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, Qt, QTimer, Slot
+# QProcess nằm ở QtCore, KHÔNG phải QtWidgets — import sai sẽ vỡ ngay lúc
+# khởi động app với ImportError.
+from PySide6.QtCore import QPoint, QProcess, Qt, QTimer, Slot
 from PySide6.QtGui import QAction, QFont, QKeySequence, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -165,6 +167,10 @@ class MainWindow(QMainWindow):
         self._queue_paused: bool = False
         self._dry_run: bool = False
         self._run_accounts: list = []
+        # tiến trình sidecar do app tự bật
+        self._signer_proc: QProcess | None = None
+        self._signer_poll: QTimer | None = None
+        self._signer_wait: int = 0
 
         self._build_ui()
         self._connect()
@@ -264,8 +270,23 @@ class MainWindow(QMainWindow):
         self.lbl_signer.setToolTip(
             f"Tiến trình ký request TikTok (chạy bằng {SIGNER_SCRIPT})")
         self.statusBar().addPermanentWidget(self.lbl_signer)
+        # Bật sidecar ngay trong app — không cần tự mở terminal
+        self.btn_signer = QPushButton("Bật sidecar")
+        self.btn_signer.setObjectName("ghost")
+        self.btn_signer.setToolTip(
+            "Mở tiến trình Node ký TikTok.\n"
+            "Tương đương chạy signer.bat / signer.sh ở cửa sổ khác,\n"
+            "nhưng bấm ở đây thì app tự quản lý."
+        )
+        self.btn_signer.clicked.connect(self._start_signer)
+        self.statusBar().addPermanentWidget(self.btn_signer)
+
         b_recheck = QPushButton("Kiểm tra lại")
         b_recheck.setObjectName("ghost")
+        b_recheck.setToolTip(
+            "Hỏi sidecar xem đã sẵn sàng chưa.\n"
+            "Bấm sau khi bật sidecar, hoặc sau khi vừa cài xong."
+        )
         b_recheck.clicked.connect(self._check_signer)
         self.statusBar().addPermanentWidget(b_recheck)
         self.b_recheck = b_recheck
@@ -672,6 +693,133 @@ class MainWindow(QMainWindow):
         """Thư mục sidecar đã tải về chưa (tức đã chạy signer ít nhất 1 lần)."""
         return (Path.cwd() / "tiktok-signature" / "node_modules").is_dir()
 
+    # ------------------------------------------------------------------ #
+    # Tự bật sidecar ký
+    # ------------------------------------------------------------------ #
+    def _start_signer(self) -> None:
+        """Mở tiến trình Node ký ngay từ trong app.
+
+        Trước đây phải tự mở terminal rồi chạy signer — dễ quên, và trên
+        Windows người dùng hay hiểu là đã xong khi thấy cửa sổ đen. Giờ app
+        tự bật, có hộp thoại log riêng để thấy nó đang làm gì.
+        """
+        if self._signer_proc is not None:
+            QMessageBox.information(
+                self, "Sidecar đang chạy",
+                "Sidecar ký đã được bật từ app này.\n"
+                "Đợi tới khi thanh dưới hiện 'sidecar ✓' rồi bấm CHẠY.")
+            return
+        script = SIGNER_SCRIPT
+        path = Path.cwd() / script
+        if not path.exists():
+            QMessageBox.warning(
+                self, "Thiếu script",
+                f"Không thấy file {script} trong thư mục hiện tại:\n"
+                f"{Path.cwd()}\n\n"
+                "Bạn có thể đã chạy app từ chỗ khác. Hãy mở app bằng "
+                f"{'start.sh' if IS_MAC else 'start.bat'} để nó dùng đúng "
+                "thư mục dự án.")
+            return
+        if not self._node_installed():
+            QMessageBox.warning(
+                self, "Thiếu Node.js",
+                "Chưa cài Node.js nên không bật được sidecar.\n\n"
+                "Cài bản LTS tại https://nodejs.org/ rồi MỞ LẠI app "
+                "(hoặc mở lại terminal) để nó nhận ra lệnh `node`.")
+            return
+
+        try:
+            self._signer_proc = QProcess(self)
+            if IS_MAC:
+                self._signer_proc.setProgram("/bin/sh")
+                self._signer_proc.setArguments([str(path)])
+            else:
+                # start "" để cửa sổ cmd không bị dính vào app
+                self._signer_proc.setProgram("cmd")
+                self._signer_proc.setArguments(
+                    ["/c", "start", "", f'"{path}"']
+                )
+            self._signer_proc.setWorkingDirectory(str(path.parent))
+            self._signer_proc.readyReadStandardOutput.connect(
+                self._signer_output)
+            self._signer_proc.errorOccurred.connect(self._signer_error)
+            self._signer_proc.finished.connect(
+                lambda *_: self._signer_finished())
+            self._signer_proc.start()
+        except Exception as e:
+            self._signer_proc = None
+            QMessageBox.critical(
+                self, "Không bật được sidecar",
+                f"{type(e).__name__}: {e}")
+            return
+
+        self.lbl_signer.setText("sidecar: ĐANG BẬT…")
+        self.lbl_signer.setProperty("role", "warn")
+        self._style_signer_label()
+        self._log("signer",
+                  f"Đang bật sidecar ký bằng {script}… "
+                  f"Lần đầu phải tải Chromium nên có thể mất vài phút.", "head")
+        # Sidecar cần 30-60 giây nạp trình duyệt; hỏi liên tục một lúc rồi bỏ.
+        self._signer_wait = 0
+        self._signer_poll = QTimer(self)
+        self._signer_poll.setInterval(2000)
+        self._signer_poll.timeout.connect(self._poll_after_start)
+        self._signer_poll.start()
+
+    @Slot()
+    def _signer_output(self) -> None:
+        # `cmd /c start` trả về NGAY (nó chỉ mở cửa sổ mới rồi thoát), nên
+        # `finished` bắn trước khi sidecar kịp nạp. Vì vậy coi việc thoát
+        # sớm là bình thường, không báo lỗi.
+        if self._signer_proc is None:
+            return
+        try:
+            data = bytes(self._signer_proc.readAllStandardOutput())
+        except RuntimeError:
+            return                      # tiến trình đã bị hủy khi đóng app
+        for line in data.decode("utf-8", "replace").splitlines()[-4:]:
+            line = line.strip()
+            if line:
+                self._log("signer", line, "info")
+
+    @Slot()
+    def _signer_error(self, err) -> None:
+        if self._signer_proc is None:
+            return
+        self._log("signer", f"Lỗi bật sidecar: {err}", "err")
+
+    def _poll_after_start(self) -> None:
+        """Sau khi bật sidecar, hỏi /health cho tới khi sẵn sàng."""
+        if self._signer_poll is None:
+            return
+        self._signer_wait += 1
+        from core.signer import Signer
+        try:
+            info = Signer(self.in_signer.text().strip()).health()
+        except Exception:
+            info = None
+        if info and info.get("ready"):
+            self._signer_poll.stop()
+            self._signer_ready = True
+            self.lbl_signer.setText(
+                f"sidecar ✓ {info.get('generationCount', 0)} chữ ký")
+            self.lbl_signer.setProperty("role", "hint")
+            self._style_signer_label()
+            self._log("signer", "Sidecar ký đã sẵn sàng.", "ok")
+            return
+        if self._signer_wait >= 45:          # ~90 giây
+            self._signer_poll.stop()
+            self._log("signer",
+                      "Sidecar vẫn chưa sẵn sàng sau 90 giây. Nếu đây là lần "
+                      "đầu, nó đang tải Chromium — cần Internet.", "warn")
+
+    @Slot()
+    def _signer_finished(self) -> None:
+        # Bình thường trên Windows: `cmd /c start` mở cửa sổ khác rồi thoát
+        # ngay, nên finished bắn trước khi sidecar nạp xong. Đừng báo lỗi.
+        self._signer_proc = None
+
+    @Slot()
     # ------------------------------------------------------------------ #
     # Kiểm tra trạng thái tài khoản (chuột phải)
     # ------------------------------------------------------------------ #
@@ -1516,11 +1664,26 @@ class MainWindow(QMainWindow):
             # QDialogButtonBox — trộn hai enum này sẽ vỡ ngay khi bấm CHẠY
             # mà sidecar chưa chạy.
             row = QMessageBox.StandardButton
+            # Nút "Bật ngay" là đường ngắn nhất: bấm là app tự mở tiến
+            # trình Node, không phải tự đi tìm file .bat/.sh.
+            can_start = self._node_installed()
             box.setStandardButtons(row.Ok)
-            box.addButton(row.Cancel)
-            box.button(row.Ok).setText("Mở hướng dẫn")
-            if box.exec() == row.Ok:
+            box.button(row.Ok).setText("Hướng dẫn")
+            if can_start:
+                btn_start = box.addButton("Bật sidecar ngay", row.AcceptRole)
+                btn_start.setToolTip(
+                    f"App sẽ tự chạy {SIGNER_SCRIPT} và tự hỏi khi nào xong.")
+            else:
+                box.setInformativeText(
+                    box.informativeText()
+                    + f"\n\n(Không có nút bật ngay vì máy chưa có Node.js. "
+                      f"Cài xong hãy mở lại app.)")
+            clicked = box.exec()
+            if clicked == row.Ok:
                 self.tabs.setCurrentWidget(self.tab_settings)
+            elif can_start and box.clickedButton() is not None \
+                    and box.clickedButton().text() == "Bật sidecar ngay":
+                self._start_signer()
             return
 
         self._run_accounts = accounts
@@ -1760,4 +1923,19 @@ class MainWindow(QMainWindow):
             self._log("cài đặt", f"Đã lưu cấu hình: {p}", "ok")
         except OSError as e:
             self._log("cài đặt", f"Không lưu được cấu hình: {e}", "err")
+
+        # Dừng sidecar mà APP khởi động. Không đụng tới tiến trình mà
+        # người dùng tự mở — cửa sổ terminal của họ vẫn phải còn nguyên.
+        if self._signer_poll is not None:
+            self._signer_poll.stop()
+        if self._signer_proc is not None:
+            try:
+                if not IS_WINDOWS and self._signer_proc.processId():
+                    import os
+                    import signal
+                    os.kill(self._signer_proc.processId(),
+                            signal.SIGTERM)
+            except Exception:
+                pass
+            self._signer_proc = None
         event.accept()

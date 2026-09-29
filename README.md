@@ -7,28 +7,152 @@ Tài liệu đầy đủ về logic và trạng thái: **[docs/QUY-TRINH.md](doc
 
 ---
 
-## Cài đặt
+## Cài đặt từ đầu (máy mới)
+
+Yêu cầu: **Python 3.9+**, **Node.js 18+**, **Git**, và khoảng **1.2 GB đĩa trống**.
+
+### Bước 1 — Cài Node.js (bắt buộc)
+
+| OS | Cách |
+|---|---|
+| Windows | <https://nodejs.org/> → bản `.msi` **LTS** → cài đặt mặc định |
+| macOS | `brew install node`, hoặc tải bản `.pkg` LTS từ nodejs.org |
+| Linux | `sudo apt install nodejs npm` (kiểm tra lại bản ≥ 18) |
+
+> **Cài xong phải đóng rồi mở lại terminal.** Cửa sổ đang mở vẫn giữ
+> `PATH` cũ, nên `node` sẽ không được nhận ra. Đây là nguyên nhân phổ biến
+> nhất gây lỗi "không tìm thấy Node.js" dù đã cài.
+
+Kiểm tra: gõ `node -v` → phải ra `v18.x` trở lên.
+
+### Bước 2 — Lấy mã nguồn
+
+```bash
+git clone https://github.com/vzetiZero/BuffReactTikTok.git
+cd BuffReactTikTok
+```
+
+Đặt tên thư mục **không có dấu cách và dấu tiếng Việt** (ví dụ đừng đặt là
+`dụ an`) — các script và đường dẫn Node xử lý kém trường hợp này.
+
+### Bước 3 — Cài thư viện + sidecar (một lệnh)
 
 **Windows**
 
 ```bat
-install.bat
+setup.bat
+```
+
+**macOS / Linux**
+
+```bash
+chmod +x setup.sh install.sh start.sh signer.sh
+./setup.sh
+```
+
+`setup` làm hết: kiểm tra Python → kiểm tra Node.js → tạo `.venv` và cài
+`PySide6`, `curl_cffi`, `requests` → tải sidecar + Chromium → kiểm tra file
+cookie, rồi in ra các bước còn lại.
+
+Cần Internet. Lần đầu tải Chromium mất vài phút.
+
+### Bước 4 — Chuẩn bị file cookie
+
+**Bước này phải tự làm, clone không có sẵn.** File cookie chứa thông tin đăng
+nhập đầy đủ nên bị loại khỏi git có chủ đích.
+
+Copy file cookie của bạn vào thư mục vừa clone, đặt tên `cokie.tik.txt`.
+Định dạng — mỗi dòng một tài khoản, 8 trường phân tách bằng `|`:
+
+```
+user_id | username | email | password | msToken | device_id | email2 | cookie_string
+```
+
+Cookie lấy từ DevTools trình duyệt: đăng nhập TikTok → F12 → tab
+**Application** → **Cookies** → `https://www.tiktok.com` → copy toàn bộ
+thành một dòng `k=v; k2=v2` vào trường cuối.
+
+### Bước 5 — Bật sidecar ký
+
+Sidecar là **tiến trình Node riêng** lắng nghe ở `http://127.0.0.1:8080`.
+Có hai cách bật:
+
+**Cách 1 — bấm trong app (tiện nhất).** Mở app, bấm nút **Bật sidecar** ở
+thanh dưới. App tự mở tiến trình và tự hỏi `/health` mỗi 2 giây cho tới khi
+thanh dưới hiện `sidecar ✓ … chữ ký`.
+
+**Cách 2 — mở cửa sổ riêng.** Windows: bấm đúp `signer.bat`.
+macOS/Linux: `./signer.sh`. Cửa sổ này **phải để mở** suốt khi chạy.
+
+> Sidecar **không cần "đăng ký"** gì cả. Nó chỉ là tiến trình Node nghe ở
+> cổng 8080 trên chính máy bạn, app tự kết nối vào. Nếu thấy *"Chưa có sidecar
+> ký"* nghĩa là tiến trình đó chưa chạy — bấm **Bật sidecar**, hoặc bấm
+> **Kiểm tra lại** sau khi đã mở cửa sổ riêng.
+
+Phải bật sidecar **trước khi bấm CHẠY**. Mở app rồi bật sidecar hay ngược
+lại đều được, miễn là sidecar phải sống lúc bấm CHẠY.
+
+> **Dung lượng:** Chromium ~390 MB + `node_modules` ~77 MB + `.venv` ~660 MB
+> ≈ **1.1 GB**. Puppeteer còn tải thêm `chrome-headless-shell` (~255 MB) mà
+> sidecar **không dùng** — bỏ được nếu bạn cần tiết kiệm chỗ:
+> ```bat
+> set PUPPETEER_SKIP_DOWNLOAD=true
+> npm install
+> npx puppeteer browsers install chrome
+> ```
+
+### Bước 6 — Mở app
+
+**Windows**
+
+```bat
 start.bat
 ```
 
 **macOS / Linux**
 
 ```bash
-chmod +x install.sh start.sh signer.sh
-./install.sh
 ./start.sh
 ```
 
-Cài tay cũng được: `pip install -r requirements.txt` rồi `python main.py`.
+Trong app:
 
-Chạy thử giao diện mà chưa cần mạng: đặt **Backend = `mock`**, rồi bấm **Thử 1 tài khoản**.
+1. Bấm **Bật sidecar** ở thanh dưới → đợi tới khi hiện `sidecar ✓`.
+   (Bỏ qua bước này nếu bạn đã mở `signer.bat` / `./signer.sh` ở cửa sổ
+   riêng rồi. Nếu bật từ cửa sổ riêng thì bấm **Kiểm tra lại** để app biết.)
+2. Bấm **📂 Nạp cookie** → chọn `cokie.tik.txt`.
+3. (Tùy chọn) Chuột phải vào bảng → **Dọn nhanh** để loại tài khoản hỏng.
+4. Dán danh sách `cid` vào ô **Danh sách cid** ở tab **Tác vụ**.
+5. Tick tài khoản → đặt **Số luồng** → bấm **▶ CHẠY**.
 
-> Cần **Python 3.9+** và **Node.js 18+** (Node chỉ dùng cho sidecar ký).
+### Cài xong thì những lần sau
+
+```bat
+start.bat          :: mở app
+setup.bat          :: KHÔNG cần chạy lại — chỉ khi máy mới hoặc git pull xong
+git pull           :: lấy bản cập nhật
+```
+
+Mỗi lần mở app: bấm **Bật sidecar** → nạp cookie (tự nhớ lần trước) → CHẠY.
+
+Lần sau app **tự nhớ** danh sách tài khoản đã nạp, nên không cần chọn file
+cookie nữa.
+
+### Cài cho nhiều máy
+
+Cài trên **một** máy đã có Node + sidecar chạy được, rồi copy toàn bộ thư mục
+sang máy khác — `tiktok-signature/` và `.venv/` đều **không** nằm trong git
+(`.gitignore`) nên phải copy riêng, hoặc chạy lại `install.bat` + `signer.bat`
+trên mỗi máy.
+
+### Xem nhanh
+
+| Muốn | Dùng gì |
+|---|---|
+| Xem giao diện, không cần mạng | Backend = `mock`, bấm **Thử 1 tài khoản** |
+| Dọn file cookie, không cần Node | Chuột phải → **Dọn nhanh** |
+| Thả tim thật | Cần sidecar + proxy xoay IP |
+| Kiểm tra tài khoản còn sống | Chuột phải → **Kiểm tra trạng thái** |
 
 ---
 
