@@ -128,9 +128,11 @@ class HttpBackend:
 
         if code == 0:
             note = f"♥ cid={cid}"
+            like_after: int | None = None
             if cfg.verify and aweme:
                 after = self._digg_count(client, aweme, cid)
                 if before is not None and after is not None:
+                    like_after = after
                     if after > before:
                         note += f" · like {before} → {after}"
                     elif after == before:
@@ -142,7 +144,8 @@ class HttpBackend:
             else:
                 note += " · API trả status_code=0"
             progress(aid, note, 100)
-            return TaskResult(ST_OK, note, comment_id=cid, found=True, ok=True)
+            return TaskResult(ST_OK, note, comment_id=cid, found=True, ok=True,
+                              like_after=like_after)
 
         msg = explain(code, res.get("status_msg", ""))
         return TaskResult(ST_FAIL, f"API từ chối: {msg}", code=code)
@@ -202,7 +205,8 @@ class HttpBackend:
         if code == 0:
             note = f"♥ cid={cid} ({likes} → {likes + 1} like)"
             progress(aid, note, 100)
-            return TaskResult(ST_OK, note, comment_id=cid, found=True, ok=True)
+            return TaskResult(ST_OK, note, comment_id=cid, found=True, ok=True,
+                              like_after=likes + 1)
         return TaskResult(
             ST_FAIL,
             f"API từ chối (code {code}): "

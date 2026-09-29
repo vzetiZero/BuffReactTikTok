@@ -55,6 +55,7 @@ class MockBackend:
         return TaskResult(
             ST_OK, note, comment_id=cid,
             found=cfg.mode == MODE_LIKE_CID, ok=True,
+            like_after=before + 1,
         )
 
     def close_thread(self) -> None:

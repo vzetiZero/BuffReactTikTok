@@ -92,6 +92,10 @@ class Account:
     proxy: str = ""              # URL curl_cffi dùng thật (có mật khẩu)
     proxy_label: str = ""        # dạng hiển thị, đã che mật khẩu
 
+    # Số like đọc lại được sau khi thả tim — dùng in dòng log
+    # "2 TIM CMT <cid>". None = chưa biết (tắt verify / chưa chạy).
+    like_after: int | None = None
+
     def has_session(self) -> bool:
         """Cookie còn sống hay không — dựa vào các key bắt buộc của web login."""
         return "sessionid_ss" in self.cookie and "sid_tt" in self.cookie
@@ -132,6 +136,57 @@ class TaskResult:
     found: bool = False
     ok: bool = False
     code: int = -1
+    # Số like đọc lại được SAU khi thả tim (chế độ verify). None = không
+    # đọc được (tắt verify, hoặc API không trả về). Dùng để in dòng log
+    # dạng "2 TIM CMT <cid>" thay vì parse lại từ note.
+    like_after: int | None = None
+
+
+# --- Định dạng dòng log thành công ----------------------------------- #
+# Người dùng muốn dạng gọn để copy đi dùng, ví dụ:
+#     2 TIM CMT 7602703562657022728
+# = "<số like> TIM CMT <cid>". Số like lấy từ phần verify đọc lại comment;
+# nếu backend không đọc được (tắt verify) thì in "OK" cho rõ là đã thành
+# công nhưng không biết số like.
+LOG_OK_LABEL = "OK"
+
+
+def format_success_line(
+    note: str,
+    comment_id: str = "",
+    like_after: int | None = None,
+) -> str:
+    """Rút gọn note thành công thành 1 dòng kiểu '2 TIM CMT <cid>'.
+
+    `note` là chuỗi backend sinh ra, ví dụ
+        "♥ cid=7602703562657022728 · like 1 → 2"
+    Hàm cố bóc cid và số like cuối cùng từ note. Trả về "" nếu không
+    đọc được cid — lúc đó caller giữ nguyên note gốc để không mất
+    thông tin.
+    """
+    import re
+
+    cid = comment_id or ""
+    if not cid:
+        m = re.search(r"cid=(\d+)", note or "")
+        if m:
+            cid = m.group(1)
+    if not cid:
+        return ""
+
+    n = like_after
+    if n is None and note:
+        # "like 1 → 2" hoặc "like=2" hoặc "(like=2)"
+        m = re.search(r"like\s*=?\s*(\d+)\s*(?:→|->)\s*(\d+)", note)
+        if m:
+            n = int(m.group(2))
+        else:
+            m = re.search(r"like\s*=?\s*(\d+)", note)
+            if m:
+                n = int(m.group(1))
+
+    head = f"{n} " if n is not None else f"{LOG_OK_LABEL} "
+    return f"{head}TIM CMT {cid}"
 
 
 class AccountTableModel(QAbstractTableModel):
@@ -491,6 +546,58 @@ class AccountTableModel(QAbstractTableModel):
 
     def selected_count(self) -> int:
         return sum(1 for a in self._rows if a.selected)
+
+    # ---- giới hạn số lượng tài khoản được chạy ------------------------ #
+    # Người dùng tick 5.000 tài khoản nhưng chỉ muốn chạy thử 60 cái để
+    # đo tốc độ thật. Hai cách chọn:
+    #   PICK_RANDOM  - bấm ngẫu nhiên, không lo trùng lặp giữa các lần
+    #   PICK_ORDER   - lấy đúng N cái đầu theo thứ tự đang hiển thị
+    # Số 0 nghĩa là "không giới hạn" (chạy hết những gì đã tick).
+    PICK_RANDOM = "random"
+    PICK_ORDER = "order"
+    PICK_LABELS = {
+        PICK_RANDOM: "Ngẫu nhiên",
+        PICK_ORDER: "Theo thứ tự",
+    }
+
+    @classmethod
+    def pick_limited(
+        cls,
+        accounts: list[Account],
+        limit: int,
+        how: str = PICK_RANDOM,
+        rng: "random.Random | None" = None,
+    ) -> list[Account]:
+        """Lấy tối đa `limit` tài khoản theo cách chọn.
+
+        Không sửa list gốc và không đụng cờ `selected` — caller tự quyết
+        định có tick lại trên bảng hay không.
+
+        `limit <= 0` hoặc >= len(accounts) thì trả về nguyên list.
+        """
+        import random as _random
+
+        if limit <= 0 or limit >= len(accounts):
+            return list(accounts)
+        if how == cls.PICK_ORDER:
+            return list(accounts[:limit])
+        r = rng or _random
+        # sample chọn k-distinct, không trùng lặp — khác shuffle() cắt đuôi
+        return r.sample(list(accounts), limit)
+
+    def pick_for_run(
+        self,
+        limit: int,
+        how: str = PICK_RANDOM,
+        rng: "random.Random | None" = None,
+    ) -> list[Account]:
+        """Phiên bản gắn với model: chỉ xét những tài khoản ĐÃ TICK.
+
+        Dùng `selected_accounts()` chứ không dùng cả `_view`, vì người dùng
+        có thể tick rồi mới đổi bộ lọc — vẫn phải chạy đúng những cái đã
+        tick, không phụ thuộc đang nhìn trang nào.
+        """
+        return self.pick_limited(self.selected_accounts(), limit, how, rng)
 
     def health_counts(self) -> dict[str, int]:
         """Đếm số tài khoản theo mức sức khoẻ, để hiện ở thanh dưới."""

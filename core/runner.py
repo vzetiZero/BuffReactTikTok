@@ -103,6 +103,12 @@ class AccountTask(QRunnable):
             result = TaskResult(ST_SKIP, "đã dừng")
 
         self.sig.progress.emit(acc.id, 100)
+        # Lưu số like + cid để GUI in dòng "2 TIM CMT <cid>".
+        # Ghi vào object Account (chỉ đọc) — runner chạy ở worker thread.
+        if result.like_after is not None:
+            acc.like_after = result.like_after
+        if result.comment_id:
+            acc.comment_id = result.comment_id
         self.sig.status.emit(acc.id, result.status, result.note)
         try:
             self.backend.close_thread()

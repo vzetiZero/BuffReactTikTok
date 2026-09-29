@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QSizePolicy,
     QSpinBox,
     QSplitter,
@@ -66,6 +67,7 @@ from core.models import (
     ST_OK,
     ST_SKIP,
     AccountTableModel,
+    format_success_line,
 )
 from core.parser import load_accounts
 from core.proxy import GatewayConfig, ProxyPool
@@ -144,6 +146,10 @@ class MainWindow(QMainWindow):
             self.proxy_pool.load(self.settings.proxy_text)
 
         self.model = AccountTableModel(self)
+        # per_page = 0 = KHÔNG phân trang, hiện toàn bộ danh sách.
+        # Trước đây chia 50 dòng 1 trang; với vài nghìn tài khoản thì
+        # phải bấm « Trước / Sau » chỉ để xem hết — thừa thao tác.
+        self.model.set_per_page(0)
         self.accounts: list = []
         self.controller = RunController(
             lambda: build_backend(
@@ -349,18 +355,8 @@ class MainWindow(QMainWindow):
         self.btn_all = QPushButton("☑ Tick tất cả")
         self.btn_none = QPushButton("☐ Bỏ tick")
         self.btn_good = QPushButton("✔ Tick còn phiên")
-        self.btn_page_on = QPushButton("Trang này +")
-        self.btn_page_off = QPushButton("Trang này −")
-        self.btn_page_on.setObjectName("ghost")
-        self.btn_page_off.setObjectName("ghost")
         for b in (self.btn_load, self.btn_all, self.btn_none, self.btn_good):
             h.addWidget(b)
-
-        sep = QLabel("│")
-        sep.setStyleSheet("color:#c8d2dc;")
-        h.addWidget(sep)
-        h.addWidget(self.btn_page_on)
-        h.addWidget(self.btn_page_off)
 
         h.addStretch(1)
 
@@ -474,66 +470,41 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ #
     def _build_pager(self) -> QWidget:
+        """Thanh đếm số tài khoản — KHÔNG phân trang nữa.
+
+        Trước đây chia 50 dòng 1 trang rồi phải bấm « Trước / Sau » để
+        cuộn hết danh sách. Với vài nghìn tài khoản thì việc đó chỉ thêm
+        thao tác, nên nay hiện TOÀN BỘ danh sách, cuộn bằng con lăn.
+        Ô đếm ở đây là thứ người dùng nhìn để biết đã quét được bao nhiêu
+        tài khoản từ file cookie.
+        """
         w = QFrame()
         w.setProperty("role", "card")
         h = QHBoxLayout(w)
         h.setContentsMargins(6, 2, 6, 2)
         h.setSpacing(4)
 
+        # Số tài khoản đã quét — làm nổi bật vì đây là con số người dùng
+        # cần để quyết định có chạy hay không.
+        self.lbl_scanned = QLabel("Chưa quét")
+        self.lbl_scanned.setStyleSheet("font-weight:700;color:#7ee787;")
+        h.addWidget(self.lbl_scanned)
+        h.addSpacing(12)
+
         self.lbl_range = QLabel("")
         self.lbl_range.setStyleSheet("color:#5f6b7a;")
         h.addWidget(self.lbl_range)
         h.addSpacing(12)
 
-        b = QPushButton("« Đầu")
-        b.setObjectName("ghost")
-        b.clicked.connect(self.model.first_page)
-        h.addWidget(b)
-        b = QPushButton("‹ Trước")
-        b.setObjectName("ghost")
-        b.clicked.connect(self.model.prev_page)
-        h.addWidget(b)
-
-        self.lbl_page = QLabel("Trang 1 / 1")
-        self.lbl_page.setStyleSheet("font-weight:700;min-width:110px;")
-        self.lbl_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        h.addWidget(self.lbl_page)
-
-        b = QPushButton("Sau ›")
-        b.setObjectName("ghost")
-        b.clicked.connect(self.model.next_page)
-        h.addWidget(b)
-        b = QPushButton("Cuối »")
-        b.setObjectName("ghost")
-        b.clicked.connect(self.model.last_page)
-        h.addWidget(b)
-
-        h.addSpacing(12)
-        h.addWidget(QLabel("Số dòng/trang:"))
-        self.cb_per_page = QComboBox()
-        for n in (25, 50, 100, 250, 500, 1000, 5000, 0):
-            self.cb_per_page.addItem("Tất cả" if n == 0 else str(n), n)
-        # khôi phục lựa chọn của phiên trước, mặc định 50
-        i_pp = self.cb_per_page.findData(self.settings.per_page or 50)
-        self.cb_per_page.setCurrentIndex(i_pp if i_pp >= 0 else 1)
-        # Phải áp cho model luôn: setCurrentIndex không phát tín hiệu, nếu
-        # chỉ set ở đây thì model vẫn giữ 25 dòng/trang mặc định.
-        self.model.set_per_page(int(self.cb_per_page.currentData() or 50))
-        self.cb_per_page.setFixedWidth(90)
-        self.cb_per_page.currentIndexChanged.connect(
-            lambda: self._on_per_page_changed()
-        )
-        h.addWidget(self.cb_per_page)
-
-        # nút bật/tắt dòng gọn — đổi được khi đang xem nhiều tài khoản
+        # nút bật/tắt dòng gọn — hữu ích hơn nữa khi hiện cả danh sách
         self.btn_compact = QPushButton("Dòng gọn" if self._compact_rows
                                        else "Dòng cao")
         self.btn_compact.setObjectName("ghost")
         self.btn_compact.setToolTip(
-            f"Dòng gọn: 1 dòng, {self.delegate.row_h()}px, "
-            f"50 dòng = {self.delegate.row_h() * 50}px — vừa khít màn 1080p.\n"
+            f"Dòng gọn: 1 dòng, {self.delegate.row_h()}px — "
+            f"nhìn được nhiều tài khoản cùng lúc.\n"
             "Dòng cao: 2 dòng (username + email tách dòng), dễ đọc hơn "
-            "nhưng chỉ ~16 dòng / trang."
+            "nhưng chỉ hiện được ~16 dòng trong khung."
         )
         self.btn_compact.clicked.connect(self._toggle_compact)
         h.addWidget(self.btn_compact)
@@ -559,33 +530,31 @@ class MainWindow(QMainWindow):
         self._refresh_pager()
 
     def _on_per_page_changed(self) -> None:
-        n = self.cb_per_page.currentData()
-        self.model.set_per_page(int(n))
-        self.settings.per_page = int(n)
-        self._refresh_pager()
+        """Đã bỏ phân trang — giữ hàm để code cũ gọi được, không làm gì."""
+        return
 
     def _refresh_pager(self) -> None:
         m = self.model
         if m.total == 0:
+            self.lbl_scanned.setText("Chưa quét")
             self.lbl_range.setText("Chưa có tài khoản")
-            self.lbl_page.setText("Trang 0 / 0")
             self.lbl_pick.setText("đã tick 0")
+            self._refresh_pick_stat()
             return
+        # Ô đếm lớn: số tài khoản đọc được từ file cookie — thứ người
+        # dùng nhìn để biết đã quét được bao nhiêu.
+        sel = m.selected_count()
+        self.lbl_scanned.setText(f"✔ Đã quét {m.total:,} tài khoản".replace(",", "."))
+
         # khi đang lọc, nói rõ đang xem bao nhiêu trong tổng số
         filtering = m.view_count != m.total
         if filtering:
             self.lbl_range.setText(
-                f"Đang xem {m.page_first}–{m.page_last} / "
-                f"{m.view_count} khớp lọc  (tổng {m.total})"
+                f"Đang lọc còn {m.view_count} / {m.total} tài khoản"
             )
         else:
-            self.lbl_range.setText(
-                f"Đang xem {m.page_first}–{m.page_last} / {m.total} tài khoản"
-            )
-        self.lbl_page.setText(f"Trang {m.page + 1} / {m.page_count}")
-        sel = m.selected_count()
-        on_page = sum(1 for a in m.page_rows() if a.selected)
-        self.lbl_pick.setText(f"đã tick {sel}/{m.total}   ·   trang này {on_page}")
+            self.lbl_range.setText("Đang hiện toàn bộ danh sách")
+        self.lbl_pick.setText(f"đã tick {sel}/{m.total}")
         self.lbl_info.setText(
             f"{m.total} tài khoản · {sel} được tick · "
             f"{sum(1 for a in m.accounts() if a.has_session())} còn phiên"
@@ -1108,6 +1077,58 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(10, 14, 10, 12)
         v.setSpacing(10)
 
+        # --- nhóm: số lượng profile chạy ---
+        # Người dùng tick hàng nghìn tài khoản nhưng chỉ muốn chạy thử
+        # N cái để đo tốc độ thật. Không có ô này thì phải bỏ tick thủ
+        # công, rất dễ sai số lượng.
+        gb_n = QGroupBox("Số lượng tài khoản chạy")
+        fn = QFormLayout(gb_n)
+        fn.setContentsMargins(10, 6, 10, 10)
+        fn.setHorizontalSpacing(8)
+        fn.setVerticalSpacing(6)
+        fn.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        # Ô số lượng + 2 radio cạnh nhau trong cùng một hàng
+        row_n = QWidget()
+        hn = QHBoxLayout(row_n)
+        hn.setContentsMargins(0, 0, 0, 0)
+        hn.setSpacing(6)
+
+        self.sp_pick = QSpinBox()
+        self.sp_pick.setRange(0, 1_000_000)
+        self.sp_pick.setValue(0)
+        self.sp_pick.setSpecialValueText("tất cả")
+        self.sp_pick.setFixedWidth(96)
+        self.sp_pick.setToolTip(
+            "0 = chạy tất cả những tài khoản đã tick.\n"
+            "Ví dụ 60 = chỉ chạy 60 tài khoản (xem nhóm bên dưới để chọn\n"
+            "lấy ngẫu nhiên hay theo thứ tự)."
+        )
+        hn.addWidget(self.sp_pick)
+
+        self.rb_pick_order = QRadioButton("Theo thứ tự")
+        self.rb_pick_random = QRadioButton("Ngẫu nhiên")
+        self.rb_pick_order.setChecked(True)
+        self.rb_pick_order.setToolTip(
+            "Lấy N tài khoản đầu theo thứ tự đang hiển thị trên bảng.\n"
+            "Dùng khi muốn chạy lại đúng một lô cũ để so sánh."
+        )
+        self.rb_pick_random.setToolTip(
+            "Bấm ngẫu nhiên N tài khoản, không trùng lặp trong một lần chọn.\n"
+            "Dùng khi muốn mẫu đại diện, tránh luôn chạy đúng một đầu danh sách."
+        )
+        hn.addWidget(self.rb_pick_order)
+        hn.addWidget(self.rb_pick_random)
+        hn.addStretch(1)
+        fn.addRow("Chạy:", row_n)
+
+        # Dòng báo số thực tế sẽ chạy, cập nhật khi tick/bỏ tick/đổi số
+        self.lbl_pick_stat = QLabel("")
+        self.lbl_pick_stat.setProperty("role", "hint")
+        self.lbl_pick_stat.setWordWrap(True)
+        fn.addRow("", self.lbl_pick_stat)
+        v.addWidget(gb_n)
+
         # --- nhóm: đích ---
         # Cố tình TỐI GIẢN: chỉ cần cid. Mọi tham số khác (aweme_id, URL,
         # từ khoá, nội dung) đã bị bỏ vì endpoint /api/comment/digg/ chỉ
@@ -1287,8 +1308,6 @@ class MainWindow(QMainWindow):
         self.btn_all.clicked.connect(lambda: self.model.toggle_all(True))
         self.btn_none.clicked.connect(self.model.select_none)
         self.btn_good.clicked.connect(self.model.select_all_with_session)
-        self.btn_page_on.clicked.connect(lambda: self.model.toggle_page(True))
-        self.btn_page_off.clicked.connect(lambda: self.model.toggle_page(False))
         self.btn_check.clicked.connect(lambda: self.start_run(mode=MODE_CHECK))
         self.btn_run.clicked.connect(self.start_run)
         self.btn_stop.clicked.connect(self.on_stop)
@@ -1304,6 +1323,12 @@ class MainWindow(QMainWindow):
         self.table.selectionModel().selectionChanged.connect(self._on_selection)
         self.cb_mode.currentIndexChanged.connect(self._refresh_detail_task)
         self._wire_search()
+
+        # Ô "số lượng tài khoản chạy" — dòng báo số thực tế phải cập nhật
+        # theo mọi thay đổi: tick/bỏ tick, đổi số, đổi radio.
+        self.sp_pick.valueChanged.connect(lambda *_: self._refresh_pick_stat())
+        self.rb_pick_order.toggled.connect(lambda *_: self._refresh_pick_stat())
+        self.rb_pick_random.toggled.connect(lambda *_: self._refresh_pick_stat())
 
         # đổi trang -> cập nhật nhãn đếm
         self.model.modelReset.connect(self._on_model_reset)
@@ -1377,7 +1402,51 @@ class MainWindow(QMainWindow):
                 f"đã tick {m.selected_count()}/{m.total}   ·   "
                 f"trang này {sum(1 for a in m.page_rows() if a.selected)}"
             )
+        self._refresh_pick_stat()
         self._refresh_summary()
+
+    # ------------------------------------------------------------------ #
+    # Chọn số lượng tài khoản chạy (ô số + 2 radio)
+    # ------------------------------------------------------------------ #
+    def _pick_how(self) -> str:
+        """Cách lấy N tài khoản: theo thứ tự hay ngẫu nhiên."""
+        return (
+            AccountTableModel.PICK_RANDOM if self.rb_pick_random.isChecked()
+            else AccountTableModel.PICK_ORDER
+        )
+
+    def _pick_limit(self) -> int:
+        return self.sp_pick.value()
+
+    def _refresh_pick_stat(self) -> None:
+        """Báo chính xác số tài khoản SẼ chạy, để không phải tự đếm tay."""
+        if not hasattr(self, "sp_pick"):
+            return
+        ticked = self.model.selected_count()
+        limit = self.sp_pick.value()
+
+        if not ticked:
+            self.lbl_pick_stat.setText(
+                "Chưa tick tài khoản nào — bấm '☑ Tick tất cả' ở thanh trên."
+            )
+            return
+        if limit <= 0:
+            self.lbl_pick_stat.setText(
+                f"Sẽ chạy toàn bộ {ticked} tài khoản đã tick "
+                f"(ô đang để 0 = không giới hạn)."
+            )
+            return
+        if limit >= ticked:
+            self.lbl_pick_stat.setText(
+                f"Ô đang để {limit} nhưng mới chỉ tick {ticked} → "
+                f"sẽ chạy hết {ticked}."
+            )
+            return
+        how = AccountTableModel.PICK_LABELS[self._pick_how()]
+        self.lbl_pick_stat.setText(
+            f"Sẽ chạy {limit} tài khoản ({how.lower()}) trong "
+            f"{ticked} tài khoản đã tick."
+        )
 
     def _refresh_summary(self) -> None:
         """Cập nhật thẻ TỔNG QUAN ở tab Chi tiết."""
@@ -1680,13 +1749,23 @@ class MainWindow(QMainWindow):
             self._log("cid", f"Bỏ qua {len(bad)} dòng không phải số: "
                              f"{', '.join(bad[:5])}", "warn")
 
-        # luôn chạy MỌI tài khoản đã tick, không giới hạn theo bộ lọc đang xem
+        # Lấy theo thứ tự đã tick, KHÔNG giới hạn theo bộ lọc/trang đang xem.
         accounts = self.model.selected_accounts()
-        if dry_run:
-            accounts = accounts[:1]
         if not accounts:
             QMessageBox.information(self, "Chưa chọn", "Hãy tick ít nhất 1 tài khoản.")
             return
+
+        # Áp ô "số lượng tài khoản chạy": 0 = chạy hết những gì đã tick,
+        # > 0 = chỉ lấy N cái theo radio đang chọn (ngẫu nhiên / thứ tự).
+        n_ticked = len(accounts)
+        limit = self._pick_limit()
+        if not dry_run and limit > 0 and limit < n_ticked:
+            accounts = self.model.pick_for_run(limit, self._pick_how())
+            how = AccountTableModel.PICK_LABELS[self._pick_how()].lower()
+            self._log("head", f"Chạy {len(accounts)}/{n_ticked} tài khoản "
+                              f"({how}).", "head")
+        if dry_run:
+            accounts = accounts[:1]
         # Thử 1 tài khoản thì chỉ chạy cid đầu, không chạy cả danh sách.
         self._cid_queue = lst[:1] if dry_run else list(lst)
         self._cid_pos = -1
@@ -1821,7 +1900,7 @@ class MainWindow(QMainWindow):
     def _set_running(self, running: bool) -> None:
         for b in (self.btn_run, self.btn_check, self.btn_load,
                   self.btn_all, self.btn_none, self.btn_dry,
-                  self.btn_good, self.btn_page_on, self.btn_page_off):
+                  self.btn_good):
             b.setEnabled(not running)
         self.btn_stop.setEnabled(running)
 
@@ -1895,7 +1974,18 @@ class MainWindow(QMainWindow):
         if cur is not None and cur.id == acc_id:
             self.detail.set_account(cur)
         if status in (ST_OK, ST_DONE):
-            self._log(acc_id, f"✔ {note or status}", "ok")
+            # Ưu tiên dòng gọn kiểu "2 TIM CMT <cid>" để copy đi dùng.
+            # Không đọc được cid thì giữ note gốc, không mất thông tin.
+            acc = self.model.by_id(acc_id)
+            line = format_success_line(
+                note,
+                comment_id=getattr(acc, "comment_id", "") or "",
+                like_after=getattr(acc, "like_after", None),
+            )
+            self._log(acc_id, line or f"✔ {note or status}", "ok")
+            if line:
+                # Ghi luôn vào cột B để nhìn bảng là biết đã thả tim cid nào
+                self.model.update_row(acc_id, note=line)
         elif status == ST_FAIL:
             self._log(acc_id, f"✖ {note}", "err")
             self._set_detail_tab_text()
@@ -1994,7 +2084,7 @@ class MainWindow(QMainWindow):
             self.settings.last_cookie_file or Path.cwd() / "cokie.tik.txt"
         )
         self.settings.cid_list = self.in_cid.toPlainText()
-        self.settings.per_page = int(self.cb_per_page.currentData() or 50)
+        self.settings.per_page = 0          # 0 = không phân trang
         self.settings.compact_rows = self._compact_rows
         try:
             p = self.settings.save()

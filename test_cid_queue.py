@@ -166,8 +166,13 @@ def _run(win, dialogs):
     print(f"\n  ghi chu tung tai khoan:")
     for a in accounts:
         print(f"    {a.username}: {a.note}")
-    ok_all = all("cid=" in n for n in notes)
-    check("moi tai khoan co ghi chu ket qua", ok_all, True)
+    # Ghi chú thành công nay rút gọn thành "N TIM CMT <cid>" (xem
+    # core.models.format_success_line) thay vì note dài "♥ cid=... · like a → b".
+    # Nên phải kiểm theo định dạng MỚI, không phải "cid=" cũ.
+    import re as _re
+    pat = _re.compile(r"^\d+ TIM CMT \d+$")
+    ok_all = all(pat.match(n or "") for n in notes)
+    check("moi tai khoan co ghi chu 'N TIM CMT <cid>'", ok_all, True)
     check("tai khoan cuoi cung OK",
           all(a.status in ("✔ Thành công",) or a.status for a in accounts), True)
 
