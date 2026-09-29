@@ -24,13 +24,18 @@ from core.models import (
     AccountTableModel,
 )
 
-NUM_W = 38      # bề ngang cột số thứ tự
-BOX_W = 22
-PAD = 6
-ROW_H = 44
-FS_MAIN = 9     # point — dòng chính
-FS_SUB = 8      # point — dòng phụ (email / ghi chú)
-FS_NUM = 8      # point — số thứ tự
+NUM_W = 32      # bề ngang cột số thứ tự
+BOX_W = 15
+PAD = 3
+# Chiều cao dòng.
+#   14 → 1 dòng chữ, 50 dòng = 700px, VỪA KHÍT trên màn 1080p khi mở to
+#         (đo thật: giao diện xung quanh ~230px, còn ~770px cho bảng).
+#   44 → 2 dòng chữ (username + email tách dòng), dễ đọc, chỉ ~16 dòng/trang.
+ROW_H = 14
+ROW_H_TALL = 44
+FS_MAIN = 8     # point — dòng chính
+FS_SUB = 7      # point — email (chỉ dùng ở chế độ cao)
+FS_NUM = 7      # point — số thứ tự
 
 ACC_FG = QColor("#1f2d3d")
 ACC_SUB = QColor("#6b7c93")
@@ -54,11 +59,29 @@ STATUS_COLOR = {
 
 
 class AccountCellDelegate(QStyledItemDelegate):
-    """Vẽ tay: checkbox + username (đậm) + email (xám) trong cùng một ô."""
+    """Vẽ tay: checkbox + username (đậm) + email (xám) trong cùng một ô.
+
+    Hai mật độ:
+      gọn (mặc định) — 1 dòng, cao 18px, vừa 50 dòng / trang. Username và
+      email nằm CÙNG MỘT DÒNG (email xám sau username) nên vẫn thấy đủ
+      thông tin mà vẫn nhỏ.
+      cao            — 2 dòng, cao 44px, dễ đọc hơn khi cần.
+    """
+
+    def __init__(self, parent=None, compact: bool = True):
+        super().__init__(parent)
+        self.compact = compact
 
     def sizeHint(self, option, index) -> QSize:  # noqa: N802
-        return QSize(option.rect.width(), ROW_H)
+        # `option` có thể là None khi Qt hỏi kích thước ngoài ngữ cảnh vẽ
+        # (ví dụ resizeRowsToContents). Không chốt None vì sẽ vỡ ngay.
+        w = option.rect.width() if option is not None else 200
+        return QSize(w, self.row_h())
 
+    def row_h(self) -> int:
+        return ROW_H if self.compact else ROW_H_TALL
+
+    # ------------------------------------------------------------------ #
     def paint(self, painter: QPainter, option, index) -> None:
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -107,14 +130,18 @@ class AccountCellDelegate(QStyledItemDelegate):
         )
 
         lines = (index.data(Qt.ItemDataRole.DisplayRole) or "").split("\n")
+        name = lines[0] if lines else ""
+        sub = lines[1] if len(lines) > 1 else ""
+        ok_session = index.data(HAS_SESSION_ROLE) is not False
 
         # --- ô tick ---
+        box = 11 if self.compact else 13
         checked = index.data(Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked
         cb = QStyleOptionButton()
         cb.rect = QRect(
             rect.left() + NUM_W + PAD,
-            rect.top() + (rect.height() - 13) // 2,
-            13, 13,
+            rect.top() + (rect.height() - box) // 2,
+            box, box,
         )
         cb.state = QStyle.StateFlag.State_Enabled
         cb.state |= QStyle.StateFlag.State_On if checked else QStyle.StateFlag.State_Off
@@ -122,29 +149,59 @@ class AccountCellDelegate(QStyledItemDelegate):
 
         x = rect.left() + NUM_W + PAD + BOX_W
         w = max(20, rect.width() - x - PAD)
+        h = rect.height()
 
         f1 = QFont()
         f1.setPointSizeF(FS_MAIN)
         f1.setBold(True)
+        fm1 = QFontMetrics(f1)
+
+        if self.compact:
+            # 1 DÒNG: username đậm, email xám ngay sau, tự cắt bằng elide.
+            # Vẽ username trước, đo bề rộng đã dùng, rồi mới vẽ email vào
+            # khoảng còn lại — nếu vẽ cả hai bằng drawText(elide) chúng sẽ
+            # đè lên nhau.
+            name_w = fm1.horizontalAdvance(name)
+            if name_w > w:
+                name = fm1.elidedText(name, Qt.TextElideMode.ElideRight, w)
+                name_w = w
+            painter.setFont(f1)
+            painter.setPen(ACC_FG if ok_session else C_WARN)
+            painter.drawText(
+                QRect(x, rect.top(), name_w, h),
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                name,
+            )
+            if sub and name_w + 8 < w:
+                f2 = QFont()
+                f2.setPointSizeF(FS_SUB)
+                painter.setFont(f2)
+                painter.setPen(ACC_SUB)
+                painter.drawText(
+                    QRect(x + name_w + 8, rect.top(), w - name_w - 8, h),
+                    int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                    QFontMetrics(f2).elidedText(sub, Qt.TextElideMode.ElideRight,
+                                                w - name_w - 8),
+                )
+            return
+
+        # 2 DÒNG: username trên, email dưới
         painter.setFont(f1)
         painter.setPen(ACC_FG)
         painter.drawText(
             QRect(x, rect.top() + 3, w, 16),
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-            QFontMetrics(f1).elidedText(lines[0] if lines else "",
-                                        Qt.TextElideMode.ElideRight, w),
+            fm1.elidedText(name, Qt.TextElideMode.ElideRight, w),
         )
-
-        if len(lines) > 1:
+        if sub:
             f2 = QFont()
             f2.setPointSizeF(FS_SUB)
             painter.setFont(f2)
-            ok_session = index.data(HAS_SESSION_ROLE) is not False
             painter.setPen(ACC_SUB if ok_session else C_WARN)
             painter.drawText(
                 QRect(x, rect.top() + 19, w, 16),
                 int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-                QFontMetrics(f2).elidedText(lines[1], Qt.TextElideMode.ElideRight, w),
+                QFontMetrics(f2).elidedText(sub, Qt.TextElideMode.ElideRight, w),
             )
 
     # ------------------------------------------------------------------ #
@@ -155,24 +212,55 @@ class AccountCellDelegate(QStyledItemDelegate):
         color = STATUS_COLOR.get(status, C_IDLE)
 
         painter.setPen(Qt.PenStyle.NoPen)
+        dot = 5 if self.compact else 7
+        top = rect.top() + (rect.height() - dot) // 2
         painter.setBrush(color)
-        painter.drawEllipse(QRect(rect.left() + PAD, rect.top() + 8, 7, 7))
+        painter.drawEllipse(QRect(rect.left() + PAD, top, dot, dot))
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
-        x = rect.left() + PAD + 16
+        x = rect.left() + PAD + dot + 5
         w = max(20, rect.width() - x - PAD)
+        h = rect.height()
 
         f1 = QFont()
         f1.setPointSizeF(FS_MAIN)
         f1.setBold(True)
+        fm1 = QFontMetrics(f1)
+
+        if self.compact:
+            # 1 DÒNG: trạng thái + ghi chú nối tiếp nhau.
+            sw = fm1.horizontalAdvance(status)
+            if sw > w:
+                status = fm1.elidedText(status, Qt.TextElideMode.ElideRight, w)
+                sw = w
+            painter.setFont(f1)
+            painter.setPen(color)
+            painter.drawText(
+                QRect(x, rect.top(), sw, h),
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                status,
+            )
+            if note and sw + 8 < w:
+                f2 = QFont()
+                f2.setPointSizeF(FS_SUB)
+                painter.setFont(f2)
+                painter.setPen(C_NOTE)
+                painter.drawText(
+                    QRect(x + sw + 8, rect.top(), w - sw - 8, h),
+                    int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                    QFontMetrics(f2).elidedText(note, Qt.TextElideMode.ElideRight,
+                                                w - sw - 8),
+                )
+            return
+
+        # 2 DÒNG
         painter.setFont(f1)
         painter.setPen(color)
         painter.drawText(
             QRect(x, rect.top() + 3, w, 16),
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-            QFontMetrics(f1).elidedText(status, Qt.TextElideMode.ElideRight, w),
+            fm1.elidedText(status, Qt.TextElideMode.ElideRight, w),
         )
-
         if note:
             f2 = QFont()
             f2.setPointSizeF(FS_SUB)

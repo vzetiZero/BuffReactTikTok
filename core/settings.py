@@ -16,6 +16,79 @@ def default_path() -> Path:
     return root / "TikTokManager" / "settings.json"
 
 
+def accounts_cache_path() -> Path:
+    """Nơi nhớ danh sách tài khoản đã nạp, để mở app lần sau khỏi nạp lại."""
+    return default_path().parent / "accounts.json"
+
+
+def save_accounts_cache(accounts: list, path: Path | None = None) -> Path:
+    """Ghi lại tài khoản đã nạp.
+
+    File này chứa cookie đầy đủ — tức tương đương MẬT KHẨU. Nó nằm trong
+    thư mục cấu hình của người dùng, không nằm trong thư mục dự án, và
+    `.gitignore` đã chặn. Tuy vậy coi nó như file bí mật: đừng copy đi
+    đừng gửi cho ai.
+
+    Chỉ lưu phần CẦN THIẾT để chạy lại. Bỏ các trường runtime (trạng thái,
+    proxy) vì chúng thuộc về phiên làm việc, không thuộc tài khoản.
+    """
+    p = Path(path) if path else accounts_cache_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {
+            "id": a.id,
+            "username": a.username,
+            "email": a.email,
+            "password": a.password,
+            "ms_token": a.ms_token,
+            "device_id": a.device_id,
+            "cookie": a.cookie,
+            "raw": a.raw,
+        }
+        for a in accounts
+    ]
+    p.write_text(
+        json.dumps(rows, ensure_ascii=False), encoding="utf-8"
+    )
+    # Chỉ chính người dùng này được đọc (vô hiệu trên Windows)
+    try:
+        p.chmod(0o600)
+    except OSError:
+        pass
+    return p
+
+
+def load_accounts_cache(path: Path | None = None) -> list:
+    """Đọc lại tài khoản đã lưu. Trả list rỗng nếu chưa có hoặc hỏng."""
+    from .models import Account  # vòng tròn import: để trong hàm
+
+    p = Path(path) if path else accounts_cache_path()
+    if not p.exists():
+        return []
+    try:
+        rows = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(rows, list):
+        return []
+    out: list[Account] = []
+    for r in rows:
+        if not isinstance(r, dict) or not r.get("username"):
+            continue
+        cookie = r.get("cookie")
+        out.append(Account(
+            id=str(r.get("id") or ""),
+            username=str(r.get("username") or ""),
+            email=str(r.get("email") or ""),
+            password=str(r.get("password") or ""),
+            ms_token=str(r.get("ms_token") or ""),
+            device_id=str(r.get("device_id") or ""),
+            cookie=cookie if isinstance(cookie, dict) else {},
+            raw=str(r.get("raw") or ""),
+        ))
+    return out
+
+
 @dataclass
 class AppSettings:
     # --- proxy ---
@@ -51,6 +124,10 @@ class AppSettings:
     # --- đường dẫn ---
     last_cookie_file: str = ""
     backend_kind: str = "http"
+    remember_accounts: bool = True   # nhớ tài khoản đã nạp, mở lại khỏi nạp
+    per_page: int = 50               # số dòng mỗi trang
+    cid_list: str = ""               # danh sách cid đang làm việc (nhớ lại)
+    compact_rows: bool = True        # dòng bảng gọn, 50 dòng / 1 trang
 
     # ------------------------------------------------------------------ #
     def apply_to_pool(self, pool: ProxyPool) -> None:

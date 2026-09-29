@@ -12,6 +12,11 @@ cokie.tik.txt
 settings.json
 .env
 
+# Bộ nhớ tài khoản đã nạp (chứa cookie đầy đủ = tương đương mật khẩu).
+# Thường nằm ở %APPDATA%\TikTokManager\accounts.json, ngoài thư mục dự án —
+# nhưng chặn luôn ở đây phòng khi ai đó tạo nhầm trong repo.
+accounts.json
+
 # Sidecar ký chữ ký — tải bằng signer.bat, KHÔNG commit
 # (node_modules + Chromium nặng vài trăm MB)
 tiktok-signature/

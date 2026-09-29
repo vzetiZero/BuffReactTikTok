@@ -39,7 +39,14 @@ from PySide6.QtWidgets import (
 )
 
 from core.backends import build_backend
-from core.config import MODE_CHECK, MODE_FIND_LIKE, MODE_LABELS, MODE_REPLY_CID, RunConfig
+from core.config import (
+    MODE_CHECK,
+    MODE_FIND_LIKE,
+    MODE_LABELS,
+    MODE_LIKE_CID,
+    MODE_REPLY_CID,
+    RunConfig,
+)
 from core.gui_bridge import init_bridge
 from core.models import (
     ID_ROLE,
@@ -49,15 +56,19 @@ from core.models import (
     ST_SKIP,
     AccountTableModel,
 )
-from core.parser import extract_aweme_id, load_accounts
+from core.parser import load_accounts
 from core.proxy import GatewayConfig, ProxyPool
 from core.runner import RunController
-from core.settings import AppSettings, default_path
+from core.settings import (
+    AppSettings,
+    default_path,
+    load_accounts_cache,
+    save_accounts_cache,
+)
 from .delegates import AccountCellDelegate
 from .detail_panel import DetailPanel
 from .meter import ThroughputMeter
 from .settings_tab import SettingsTab
-from .style import ROW_H
 
 LEVEL_COLOR = {
     "info": "#4a5a6e",
@@ -74,7 +85,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         init_bridge()
         self.setWindowTitle("TikTok Comment Manager — thả tim hàng loạt theo CID")
-        self.resize(1180, 820)
+        # Mở to cửa sổ: 50 dòng gọn = 800px bảng, cộng ~200px giao diện xung
+        # quanh thì cần ~1000px chiều cao — chỉ vừa khi chiếm hết màn hình.
+        # Người dùng vẫn tự thu nhỏ lại được.
+        self.showMaximized()
 
         self.settings = AppSettings.load()
         self.proxy_pool = ProxyPool(
@@ -103,6 +117,12 @@ class MainWindow(QMainWindow):
         self._progress: dict[str, int] = {}
         self._last_run = ""
         self._signer_ready = False
+        # Hàng đợi cid: chạy xong cid này thì tự nhảy sang cid kế tiếp.
+        self._cid_queue: list[str] = []
+        self._cid_pos: int = -1
+        self._queue_paused: bool = False
+        self._dry_run: bool = False
+        self._run_accounts: list = []
 
         self._build_ui()
         self._connect()
@@ -123,15 +143,49 @@ class MainWindow(QMainWindow):
         self._signer_ticks = 0
 
         self._refresh_detail_task()
-        self._log("Nhấn 'Nạp cookie' ở thanh công cụ để bắt đầu.", "head")
+        # Khôi phục danh sách cid của phiên làm việc trước
+        if self.settings.cid_list:
+            self.in_cid.setPlainText(self.settings.cid_list)
         QTimer.singleShot(200, self._check_signer)
         QTimer.singleShot(400, self._after_start)
 
     # ------------------------------------------------------------------ #
     def _after_start(self) -> None:
+        self._restore_accounts()
         if self.settings.proxy_auto_check and self.proxy_pool.has_any():
             self.tabs.setCurrentWidget(self.tab_settings)
             self.tab_settings._on_check()
+
+    def _restore_accounts(self) -> None:
+        """Mở app lần sau: tự nạp lại tài khoản đã lưu, khỏi bấm 'Nạp cookie'.
+
+        Ưu tiên đọc lại FILE GỐC nếu vẫn còn, vì file đó luôn mới hơn bản nhớ.
+        Chỉ khi file biến mất (đổi máy, xoá nhầm) mới dùng bản nhớ.
+        """
+        if not self.settings.remember_accounts:
+            self._log("head", "Nhấn 'Nạp cookie' ở thanh công cụ để bắt đầu.", "head")
+            return
+
+        src = self.settings.last_cookie_file
+        if src and Path(src).exists():
+            try:
+                accounts = load_accounts(src)
+            except OSError as e:
+                self._log("head", f"Không đọc được file đã lưu: {e}", "warn")
+            else:
+                if accounts:
+                    self._apply_accounts(accounts, f"file {Path(src).name}")
+                    self._log("head", "Đã tự nạp lại tài khoản từ lần trước.",
+                              "head")
+                    return
+        cached = load_accounts_cache()
+        if cached:
+            self._apply_accounts(cached, "bộ nhớ của phiên trước")
+            self._log("head",
+                      f"Không thấy file cookie cũ — dùng {len(cached)} tài khoản "
+                      f"đã lưu. Bấm 'Nạp cookie' để nạp file mới.", "head")
+            return
+        self._log("head", "Nhấn 'Nạp cookie' ở thanh công cụ để bắt đầu.", "head")
 
     # ------------------------------------------------------------------ #
     # Dựng giao diện
@@ -183,8 +237,10 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     def _build_account_tab(self, host: QWidget) -> None:
         v = QVBoxLayout(host)
-        v.setContentsMargins(8, 8, 8, 8)
-        v.setSpacing(8)
+        # Lề mỏng — mỗi px tiết kiệm ở đây đều tới bảng, để 50 dòng vừa
+        # khít màn 1080p mà không phải cuộn.
+        v.setContentsMargins(6, 5, 6, 5)
+        v.setSpacing(5)
         v.addWidget(self._build_toolbar())
         v.addWidget(self._build_table(), 1)
 
@@ -272,10 +328,11 @@ class MainWindow(QMainWindow):
         w = QFrame()
         w.setProperty("role", "card")
         h = QHBoxLayout(w)
-        h.setContentsMargins(8, 6, 8, 6)
+        h.setContentsMargins(6, 3, 6, 3)
         h.setSpacing(6)
 
         self.in_search = QLineEdit()
+        self.in_search.setFixedHeight(22)
         self.in_search.setPlaceholderText(
             "Tìm theo username, email, proxy, trạng thái, kết quả…   "
             "(nhiều từ = phải khớp tất cả)"
@@ -351,7 +408,7 @@ class MainWindow(QMainWindow):
         w = QFrame()
         w.setProperty("role", "card")
         h = QHBoxLayout(w)
-        h.setContentsMargins(8, 5, 8, 5)
+        h.setContentsMargins(6, 2, 6, 2)
         h.setSpacing(4)
 
         self.lbl_range = QLabel("")
@@ -387,21 +444,55 @@ class MainWindow(QMainWindow):
         self.cb_per_page = QComboBox()
         for n in (25, 50, 100, 250, 500, 1000, 5000, 0):
             self.cb_per_page.addItem("Tất cả" if n == 0 else str(n), n)
-        self.cb_per_page.setCurrentIndex(1)          # 50
+        # khôi phục lựa chọn của phiên trước, mặc định 50
+        i_pp = self.cb_per_page.findData(self.settings.per_page or 50)
+        self.cb_per_page.setCurrentIndex(i_pp if i_pp >= 0 else 1)
+        # Phải áp cho model luôn: setCurrentIndex không phát tín hiệu, nếu
+        # chỉ set ở đây thì model vẫn giữ 25 dòng/trang mặc định.
+        self.model.set_per_page(int(self.cb_per_page.currentData() or 50))
         self.cb_per_page.setFixedWidth(90)
         self.cb_per_page.currentIndexChanged.connect(
             lambda: self._on_per_page_changed()
         )
         h.addWidget(self.cb_per_page)
 
+        # nút bật/tắt dòng gọn — đổi được khi đang xem nhiều tài khoản
+        self.btn_compact = QPushButton("Dòng gọn" if self._compact_rows
+                                       else "Dòng cao")
+        self.btn_compact.setObjectName("ghost")
+        self.btn_compact.setToolTip(
+            f"Dòng gọn: 1 dòng, {self.delegate.row_h()}px, "
+            f"50 dòng = {self.delegate.row_h() * 50}px — vừa khít màn 1080p.\n"
+            "Dòng cao: 2 dòng (username + email tách dòng), dễ đọc hơn "
+            "nhưng chỉ ~16 dòng / trang."
+        )
+        self.btn_compact.clicked.connect(self._toggle_compact)
+        h.addWidget(self.btn_compact)
+
         h.addStretch(1)
         self.lbl_pick = QLabel("")
         h.addWidget(self.lbl_pick)
         return w
 
+    def _toggle_compact(self) -> None:
+        self._compact_rows = not self._compact_rows
+        self.delegate.compact = self._compact_rows
+        self.settings.compact_rows = self._compact_rows
+        self._apply_row_height()
+        self.btn_compact.setText("Dòng gọn" if self._compact_rows else "Dòng cao")
+        self.btn_compact.setToolTip(
+            f"Dòng gọn: 1 dòng, {self.delegate.row_h()}px, "
+            f"50 dòng = {self.delegate.row_h() * 50}px.\n"
+            "Dòng cao: 2 dòng (username + email tách dòng), dễ đọc hơn "
+            "nhưng chỉ ~16 dòng / trang."
+        )
+        self.model._refresh_page()
+        self._refresh_pager()
+
     def _on_per_page_changed(self) -> None:
         n = self.cb_per_page.currentData()
         self.model.set_per_page(int(n))
+        self.settings.per_page = int(n)
         self._refresh_pager()
 
     def _refresh_pager(self) -> None:
@@ -441,19 +532,25 @@ class MainWindow(QMainWindow):
     def _build_table(self) -> QWidget:
         box = QGroupBox("Danh sách tài khoản")
         v = QVBoxLayout(box)
-        v.setSpacing(4)
+        v.setSpacing(3)
+        # Lề mỏng: mỗi px ở đây là 1px thêm cho bảng, mà bảng đang thiếu
+        # chỗ để hiện đủ 50 dòng mà không phải cuộn.
+        v.setContentsMargins(6, 4, 6, 4)
         v.addWidget(self._build_search())
 
         self.table = QTableView()
         self.table.setModel(self.model)
-        self.table.setItemDelegate(AccountCellDelegate(self.table))
+        # Chế độ gọn: 1 dòng / ô, cao 14px, vừa 50 dòng / trang.
+        self._compact_rows = self.settings.compact_rows
+        self.delegate = AccountCellDelegate(self.table, compact=self._compact_rows)
+        self.table.setItemDelegate(self.delegate)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setVerticalScrollMode(
             QAbstractItemView.ScrollMode.ScrollPerPixel
         )
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(ROW_H)
+        self._apply_row_height()
         self.table.horizontalHeader().setHighlightSections(False)
         # Bấm tiêu đề cột để sắp xếp — TỰ điều khiển, không dùng
         # setSortingEnabled(True) của Qt: bật cái đó thì Qt tự sắp lại mỗi
@@ -476,6 +573,21 @@ class MainWindow(QMainWindow):
         v.addWidget(self._build_pager())
         return box
 
+    def _apply_row_height(self) -> None:
+        """Đặt chiều cao dòng thật sự.
+
+        `minimumSectionSize` mặc định là 24px và nó chặn MỌI giá trị nhỏ
+        hơn — kể cả `setDefaultSectionSize(14)`. Muốn dòng 14px thì phải hạ
+        minimum xuống trước, nếu không bảng cứ vẽ 24px và 50 dòng không bao
+        giờ vừa màn hình. Đây là bẫy rất dễ sót vì không có lỗi nào hiện ra.
+        """
+        vh = self.table.verticalHeader()
+        h = self.delegate.row_h()
+        vh.setMinimumSectionSize(h)
+        vh.setDefaultSectionSize(h)
+        # Các section đã tạo có thể đang giữ kích thước cũ.
+        vh.resizeSection(0, h)
+
     def _build_task(self) -> QWidget:
         box = QGroupBox("Tác vụ")
         box.setMaximumWidth(520)
@@ -484,40 +596,42 @@ class MainWindow(QMainWindow):
         v.setSpacing(10)
 
         # --- nhóm: đích ---
-        gb_t = QGroupBox("Đích  (bài viết + bình luận)")
+        # Cố tình TỐI GIẢN: chỉ cần cid. Mọi tham số khác (aweme_id, URL,
+        # từ khoá, nội dung) đã bị bỏ vì endpoint /api/comment/digg/ chỉ
+        # cần `cid` — và thêm tham số lạ làm hỏng chữ ký.
+        gb_t = QGroupBox("Đích  (danh sách cid)")
         ft = QFormLayout(gb_t)
         ft.setContentsMargins(10, 6, 10, 10)
         ft.setHorizontalSpacing(8)
         ft.setVerticalSpacing(5)
-        ft.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        ft.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
 
         self.cb_mode = QComboBox()
         for key, label in MODE_LABELS.items():
             self.cb_mode.addItem(label, key)
+        self.cb_mode.setCurrentIndex(
+            self.cb_mode.findData(MODE_LIKE_CID)
+        )
         ft.addRow("Chế độ:", self.cb_mode)
 
-        self.in_cid = QLineEdit("7690897576899658504")
-        self.in_cid.setPlaceholderText("vd: 7690897576899658504")
-        ft.addRow("Comment ID (cid):", self.in_cid)
-
-        self.in_aweme = QLineEdit()
-        self.in_aweme.setPlaceholderText("vd: 7456789012345678901")
-        ft.addRow("aweme_id:", self.in_aweme)
-
-        self.in_video = QLineEdit()
-        self.in_video.setPlaceholderText("dán URL — sẽ tự lấy aweme_id")
-        ft.addRow("URL bài viết:", self.in_video)
-
-        self.in_kw = QLineEdit()
-        self.in_kw.setPlaceholderText("vd: Luyện makeup cùng Giang")
-        ft.addRow("Từ khoá reply:", self.in_kw)
-
-        self.in_comment = QTextEdit()
-        self.in_comment.setPlaceholderText(
-            "Nội dung trả lời (chỉ dùng ở chế độ 'Trả lời theo CID')"
+        # Ô nhập nhiều cid: mỗi dòng 1 id, hoặc tách bằng dấu phẩy.
+        self.in_cid = QTextEdit()
+        self.in_cid.setPlaceholderText(
+            "7690897576899658504\n7654223771003994898\n7700000000000000001"
         )
-        self.in_comment.setFixedHeight(54)
-        ft.addRow("Nội dung:", self.in_comment)
+        self.in_cid.setFixedHeight(112)
+        self.in_cid.setAcceptRichText(False)
+        self.in_cid.setToolTip(
+            "Mỗi dòng một cid (cũng chấp nhận phân tách bằng dấu phẩy).\n"
+            "Hệ thống chạy xong cid này sẽ tự chuyển sang cid kế tiếp."
+        )
+        ft.addRow("Danh sách cid:", self.in_cid)
+
+        # Hàng thông báo: bao nhiêu cid hợp lệ, đang ở cid nào.
+        self.lbl_cid_stat = QLabel("")
+        self.lbl_cid_stat.setProperty("role", "hint")
+        self.lbl_cid_stat.setWordWrap(True)
+        ft.addRow("", self.lbl_cid_stat)
         v.addWidget(gb_t)
 
         # --- nhóm: tốc độ ---
@@ -668,7 +782,7 @@ class MainWindow(QMainWindow):
         self.btn_log.clicked.connect(
             lambda: self.tabs.setCurrentWidget(self.tab_detail)
         )
-        self.in_video.editingFinished.connect(self._autofill_aweme)
+        self.in_cid.textChanged.connect(self._on_cid_text_changed)
         self.cb_pool.toggled.connect(self._refresh_proxy_label)
         self.tab_settings.log.connect(self._on_settings_log)
         self.tab_settings.proxies_ready.connect(self._on_proxies_ready)
@@ -721,15 +835,12 @@ class MainWindow(QMainWindow):
         """Cập nhật thẻ 'tác vụ đang chọn' khi đổi chế độ / nhập cid."""
         if not hasattr(self, "detail"):
             return
-        from core.parser import video_url
-
         cfg = self._collect_cfg()
         self.detail.set_task(
             MODE_LABELS.get(cfg.mode, cfg.mode),
-            cfg.cid, cfg.aweme_id, cfg.concurrency,
+            cfg.cid, "", cfg.concurrency,
         )
-        url = video_url(cfg.video) if cfg.video else ""
-        self.detail.set_video(url, cfg.aweme_id, cfg.cid)
+        self.detail.set_video("", "", cfg.cid)
 
     # ------------------------------------------------------------------ #
     def _on_settings_log(self, message: str, level: str) -> None:
@@ -797,14 +908,64 @@ class MainWindow(QMainWindow):
             parts.append(f"{n - n_assigned} account dùng IP máy")
         self.lbl_proxy.setText(" · ".join(parts))
 
-    def _autofill_aweme(self) -> None:
-        v = self.in_video.text().strip()
-        if v and not self.in_aweme.text().strip():
-            aw = extract_aweme_id(v)
-            if aw:
-                self.in_aweme.setText(aw)
-                self._log("cid", f"Tự lấy aweme_id từ URL: {aw}", "info")
+    # ------------------------------------------------------------------ #
+    # Danh sách cid
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def parse_cids(text: str) -> tuple[list[str], list[str]]:
+        """Tách danh sách cid từ ô nhập.
+
+        Chấp nhận mỗi dòng một id, hoặc nhiều id trên một dòng tách bằng
+        dấu phẩy / khoảng trắng. Dòng bắt đầu bằng `#` là ghi chú, bỏ qua.
+
+        Trả về `(danh sách hợp lệ, danh sách bỏ qua)`. Giữ thứ tự người
+        dùng gõ và loại trùng — vì thứ tự chính là thứ tự sẽ chạy.
+        """
+        good: list[str] = []
+        bad: list[str] = []
+        seen: set[str] = set()
+        for raw in (text or "").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            # tách theo dấu phẩy, chấm phẩy, tab, khoảng trắng
+            for part in line.replace(";", ",").replace("\t", ",").replace(" ", ",").split(","):
+                cid = part.strip()
+                if not cid:
+                    continue
+                if not cid.isdigit() or not (15 <= len(cid) <= 25):
+                    bad.append(cid)
+                elif cid in seen:
+                    continue          # trùng -> bỏ, không báo lỗi
+                else:
+                    seen.add(cid)
+                    good.append(cid)
+        return good, bad
+
+    def cids(self) -> list[str]:
+        """Danh sách cid hợp lệ, theo đúng thứ tự sẽ chạy."""
+        return self.parse_cids(self.in_cid.toPlainText())[0]
+
+    def _on_cid_text_changed(self) -> None:
+        good, bad = self.parse_cids(self.in_cid.toPlainText())
+        self._refresh_cid_label(good, bad, running=0)
         self._refresh_detail_task()
+
+    def _refresh_cid_label(self, good=None, bad=None, running: int = 0) -> None:
+        if good is None:
+            good, bad = self.parse_cids(self.in_cid.toPlainText())
+        parts = []
+        if not good:
+            parts.append("Chưa có cid nào — mỗi dòng một id")
+        else:
+            parts.append(f"{len(good)} cid hợp lệ")
+            if running:
+                parts.append(f"đang chạy cid {running}/{len(good)}")
+        if bad:
+            parts.append(f"{len(bad)} dòng bỏ qua (không phải số): "
+                         + ", ".join(bad[:3])
+                         + ("…" if len(bad) > 3 else ""))
+        self.lbl_cid_stat.setText(" · ".join(parts))
 
     # ------------------------------------------------------------------ #
     @Slot()
@@ -878,11 +1039,24 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Chưa có file", "Hãy chọn file cookie.")
                 return
         try:
-            self.accounts = load_accounts(path)
+            accounts = load_accounts(path)
         except OSError as e:
             QMessageBox.critical(self, "Lỗi đọc file", str(e))
             return
 
+        self._apply_accounts(accounts, f"file {Path(path).name}")
+        # Ghi lại để lần sau mở app khỏi phải nạp lại.
+        self.settings.last_cookie_file = str(path)
+        if self.settings.remember_accounts:
+            try:
+                p = save_accounts_cache(accounts)
+                self._log("head", f"Đã nhớ {len(accounts)} tài khoản: {p}", "head")
+            except OSError as e:
+                self._log("head", f"Không lưu được danh sách nhớ: {e}", "warn")
+
+    def _apply_accounts(self, accounts: list, source: str) -> None:
+        """Đưa danh sách tài khoản vào bảng + gán proxy + tick mặc định."""
+        self.accounts = accounts
         self._progress.clear()
         self.pbar.setValue(0)
 
@@ -896,22 +1070,31 @@ class MainWindow(QMainWindow):
         self._refresh_proxy_label()
         self._refresh_pager()
         self._set_detail_tab_text()
-        self._log("head", f"Đã nạp {len(self.accounts)} tài khoản từ {path}", "head")
+        self._log("head", f"Đã nạp {len(self.accounts)} tài khoản từ {source}", "head")
+        n_no = 0
         for a in self.accounts:
             if not a.has_session():
-                self._log(a.id, f"{a.username}: cookie thiếu sessionid_ss", "warn")
+                n_no += 1
+        if n_no:
+            # 1000 tài khoản hỏng phiên thì log sẽ ngập, nên gom thành 1 dòng
+            self._log(
+                "head",
+                f"Cảnh báo: {n_no}/{len(self.accounts)} tài khoản thiếu "
+                f"sessionid_ss — xem thẻ Chi tiết để biết tài khoản nào.",
+                "warn",
+            )
 
     # ------------------------------------------------------------------ #
-    def _collect_cfg(self) -> RunConfig:
-        kw = self.in_kw.text().strip()
+    def _collect_cfg(self, cid: str = "") -> RunConfig:
+        """ Gom tham số chạy. `cid` ghi đè để chạy tiếp cid kế tiếp. """
         return RunConfig(
             mode=self.cb_mode.currentData(),
-            cid=self.in_cid.text().strip(),
-            aweme_id=self.in_aweme.text().strip(),
-            video=self.in_video.text().strip(),
-            comment=self.in_comment.toPlainText().strip(),
-            search_keyword=kw,
-            target_text=kw,
+            cid=cid or (self.cids()[0] if self.cids() else ""),
+            aweme_id="",                # cố tình bỏ — xem _build_task
+            video="",
+            comment="",
+            search_keyword="",
+            target_text="",
             signer_url=self.in_signer.text().strip(),
             proxy=self._fallback_proxy(),
             use_proxy_pool=self.cb_pool.isChecked(),
@@ -958,7 +1141,21 @@ class MainWindow(QMainWindow):
                 self.cb_mode.setCurrentIndex(i)
 
         self._sync_from_settings_tab()
-        cfg = self._collect_cfg()
+        # Gom danh sách cid TRƯỚC, rồi chạy lần lượt từng cid.
+        lst = self.cids()
+        good, bad = self.parse_cids(self.in_cid.toPlainText())
+        if self.cb_mode.currentData() == MODE_LIKE_CID and not good:
+            QMessageBox.warning(
+                self, "Thiếu cid",
+                "Hãy nhập ít nhất một cid vào ô 'Danh sách cid'.\n"
+                "Mỗi dòng một id, ví dụ:\n"
+                "7690897576899658504\n7654223771003994898",
+            )
+            return
+        if bad:
+            self._log("cid", f"Bỏ qua {len(bad)} dòng không phải số: "
+                             f"{', '.join(bad[:5])}", "warn")
+
         # luôn chạy MỌI tài khoản đã tick, không giới hạn theo bộ lọc đang xem
         accounts = self.model.selected_accounts()
         if dry_run:
@@ -966,15 +1163,10 @@ class MainWindow(QMainWindow):
         if not accounts:
             QMessageBox.information(self, "Chưa chọn", "Hãy tick ít nhất 1 tài khoản.")
             return
-        if cfg.mode in ("like_cid", MODE_REPLY_CID) and not cfg.cid.isdigit():
-            QMessageBox.warning(self, "CID sai", "cid phải là chuỗi số 18-19 ký tự.")
-            return
-        if cfg.mode == MODE_FIND_LIKE and not cfg.target_text:
-            QMessageBox.warning(self, "Thiếu từ khoá", "Nhập từ khoá cần tìm reply.")
-            return
-        if cfg.mode == MODE_REPLY_CID and not cfg.comment:
-            QMessageBox.warning(self, "Thiếu nội dung", "Nhập nội dung trả lời.")
-            return
+        # Thử 1 tài khoản thì chỉ chạy cid đầu, không chạy cả danh sách.
+        self._cid_queue = lst[:1] if dry_run else list(lst)
+        self._cid_pos = -1
+        self._dry_run = dry_run
 
         # Chặn sớm khi sidecar chưa chạy — nếu không, MỌI tài khoản sẽ đỏ
         # và người dùng tưởng cookie hỏng.
@@ -994,29 +1186,49 @@ class MainWindow(QMainWindow):
                 "  3. Quay lại đây, bấm nút 'Kiểm tra lại' ở thanh dưới.\n\n"
                 "Muốn chỉ xem thao tác chạy thì chọn Backend = mock."
             )
-            row = QDialogButtonBox.StandardButton
-            box.setStandardButtons(row.Ok | row.Cancel)
+            # QMessageBox dùng StandardButton CỦA NÓ, không phải của
+            # QDialogButtonBox — trộn hai enum này sẽ vỡ ngay khi bấm CHẠY
+            # mà sidecar chưa chạy.
+            row = QMessageBox.StandardButton
+            box.setStandardButtons(row.Ok)
+            box.addButton(row.Cancel)
             box.button(row.Ok).setText("Mở hướng dẫn")
             if box.exec() == row.Ok:
                 self.tabs.setCurrentWidget(self.tab_settings)
             return
 
+        self._run_accounts = accounts
+        self._start_next_cid()
+
+    def _start_next_cid(self) -> None:
+        """Chạy cid tiếp theo trong hàng đợi. Không làm gì nếu đã hết."""
+        if self._cid_pos + 1 >= len(self._cid_queue):
+            self._cid_queue = []
+            return
+
+        self._cid_pos += 1
+        cid = self._cid_queue[self._cid_pos]
+        accounts = self._run_accounts
+        cfg = self._collect_cfg(cid)
+        total = len(self._cid_queue)
+
         self.model.reset_status()
         self._progress.clear()
         self.pbar.setValue(0)
         self._set_running(True)
+        self._refresh_cid_label(running=self._cid_pos + 1)
+        self._refresh_detail_task()
+
         n = len(accounts)
         n_own = sum(1 for a in accounts if a.proxy) if cfg.use_proxy_pool else 0
-        self._log(
-            "head",
-            f"▶ {MODE_LABELS[cfg.mode]} · {n} account · "
-            f"{cfg.concurrency} luồng · cid={cfg.cid or '-'}",
-            "head",
-        )
+        head = f"▶ cid {self._cid_pos + 1}/{total}: {cid}"
+        if total > 1:
+            head += f"   [{self._cid_pos + 2} cid chờ]"
+        self._log("head", f"{head} · {n} account · {cfg.concurrency} luồng", "head")
         if not cfg.use_proxy_pool:
-            self._log("head", f"   đường ra: tất cả qua IP máy (tắt proxy)", "head")
+            self._log("head", "   đường ra: tất cả qua IP máy (tắt proxy)", "head")
         elif n_own == n:
-            self._log("head", f"   đường ra: tất cả qua proxy được gán", "head")
+            self._log("head", "   đường ra: tất cả qua proxy được gán", "head")
         else:
             rest = n - n_own
             via = (f"proxy hệ thống ({cfg.proxy})" if cfg.proxy else "IP máy")
@@ -1029,9 +1241,15 @@ class MainWindow(QMainWindow):
 
     def on_stop(self) -> None:
         if self.controller.busy:
-            self._log("warn", "Đang dừng — các luồng còn tối đa vài giây…", "warn")
+            left = len(self._cid_queue) - self._cid_pos - 1
+            tail = f" — bỏ {left} cid còn lại" if left > 0 else ""
+            self._log("warn", f"Đang dừng — các luồng còn tối đa vài giây{tail}…",
+                      "warn")
             self.controller.stop()
             self.btn_stop.setEnabled(False)
+            # Dừng tay = bỏ hàng đợi. Không xoá ở đây vì _on_finished còn
+            # phải chạy; nó sẽ thấy cờ này và không sang cid kế tiếp.
+            self._queue_paused = True
 
     def _set_running(self, running: bool) -> None:
         for b in (self.btn_run, self.btn_check, self.btn_load,
@@ -1129,28 +1347,58 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_finished(self) -> None:
-        self._set_running(False)
-        self.pbar.setValue(100)
-        self.meter.stop()
         rows = self.model.accounts()
         ok = sum(1 for a in rows if a.status == ST_OK)
         done = sum(1 for a in rows if a.status == ST_DONE)
         err = sum(1 for a in rows if a.status == ST_FAIL)
         skip = sum(1 for a in rows if a.status == ST_SKIP)
+        self.pbar.setValue(100)
+        self.meter.stop()
         self.lbl_stat.setText(f"✔ {ok} · ● {done} · ✖ {err} · – {skip}")
         self._last_run = (
             datetime.datetime.now().strftime("%H:%M:%S")
             + f"  ({self.meter._total} acc, {self.meter._threads} luồng, "
             + f"{self.meter._avg:.1f} acc/s)"
         )
+        cid = self._cid_queue[self._cid_pos] if self._cid_queue else ""
+        pos = self._cid_pos + 1
+        total = len(self._cid_queue)
         self._log(
             "head",
-            f"■ Xong. thành công {ok}, hợp lệ {done}, lỗi {err}, bỏ qua {skip}",
+            f"■ cid {pos}/{total} ({cid}) xong — thành công {ok}, hợp lệ {done}, "
+            f"lỗi {err}, bỏ qua {skip}",
             "head",
         )
         self._refresh_pager()
         self._set_detail_tab_text()
         self._refresh_summary()
+
+        # --- sang cid kế tiếp, trừ khi người dùng bấm DỪNG ---
+        if self._queue_paused:
+            left = total - pos
+            self._log(
+                "warn",
+                f"Đã dừng theo yêu cầu. Còn {left} cid chưa chạy."
+                if left else "Đã dừng theo yêu cầu.",
+                "warn",
+            )
+            self._cid_queue = []
+            self._queue_paused = False
+            self._refresh_cid_label()
+            self._set_running(False)
+            return
+
+        if pos < total:
+            self._log("head", f"── chuyển sang cid tiếp theo ({pos + 1}/{total}) "
+                              f"──", "head")
+            self._start_next_cid()
+            return
+
+        # hết hàng đợi
+        self._cid_queue = []
+        self._log("head", f"■ ĐÃ XONG toàn bộ {total} cid.", "head")
+        self._refresh_cid_label()
+        self._set_running(False)
 
     # ------------------------------------------------------------------ #
     def _log(self, tag: str, message: str, level: str = "info") -> None:
@@ -1178,6 +1426,9 @@ class MainWindow(QMainWindow):
         self.settings.last_cookie_file = str(
             self.settings.last_cookie_file or Path.cwd() / "cokie.tik.txt"
         )
+        self.settings.cid_list = self.in_cid.toPlainText()
+        self.settings.per_page = int(self.cb_per_page.currentData() or 50)
+        self.settings.compact_rows = self._compact_rows
         try:
             p = self.settings.save()
             self._log("cài đặt", f"Đã lưu cấu hình: {p}", "ok")

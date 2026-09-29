@@ -53,10 +53,27 @@ class HttpBackend:
             )
 
             # --- 1. xác nhận đăng nhập ------------------------------- #
-            progress(aid, "Kiểm tra phiên đăng nhập...", 15)
-            user = client.user_detail(account.username)
-            nickname = user.get("nickname") or account.username
-            progress(aid, f"Đăng nhập OK — {nickname}", 30)
+            # BƯỚC NÀY KHÔNG ĐƯỢC CHẶN LƯỚT CHẠY.
+            # Đo thật: /api/user/detail/ bị TikTok trả 10221 (phát hiện bot)
+            # trong khi /api/comment/digg/ vẫn trả status_code=0 bình thường.
+            # Nếu để lỗi ở đây làm fail cả task thì không bao giờ thả tim
+            # được, dù request thả tim hoàn toàn có thể chạy.
+            # Vì vậy: lỗi ở bước kiểm tra -> ghi nhận và vẫn thử thả tim.
+            # Lỗi ở chính thao tác thả tim mới là kết quả thật.
+            nickname = account.username
+            try:
+                progress(aid, "Kiểm tra phiên đăng nhập...", 15)
+                user = client.user_detail(account.username)
+                nickname = user.get("nickname") or account.username
+                progress(aid, f"Đăng nhập OK — {nickname}", 30)
+            except TikTokError as e:
+                progress(aid, f"Kiểm tra phiên bị từ chối ({e.code}) — "
+                              f"vẫn thử thả tim", 22)
+                if cfg.mode == MODE_CHECK:
+                    # chế độ chỉ kiểm tra: không kiểm tra được thì báo thật
+                    return TaskResult(
+                        ST_FAIL, f"Kiểm tra phiên thất bại: {e}", code=e.code,
+                    )
 
             if cfg.mode == MODE_CHECK:
                 return TaskResult(ST_DONE, f"Cookie hợp lệ ({nickname})", ok=True)

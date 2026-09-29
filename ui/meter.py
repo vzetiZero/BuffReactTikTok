@@ -40,7 +40,7 @@ class Sparkline(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(26)
+        self.setFixedHeight(22)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._data: deque = deque(maxlen=40)
 
@@ -96,7 +96,9 @@ class ThroughputMeter(QFrame):
         super().__init__(parent)
         self.setProperty("role", "card")
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.setFixedHeight(52)
+        # 42px thay vì 52px: ô này nằm trên thanh công cụ, mỗi px giảm ở đây
+        # là 1px thêm cho bảng — và bảng cần đủ chỗ cho 50 dòng.
+        self.setFixedHeight(42)
 
         self._total = 0
         self._done = 0
@@ -194,18 +196,18 @@ class ThroughputMeter(QFrame):
 
         pad = 8
         x = r.left() + pad
-        y = r.top() + 6
+        y = r.top() + 4
         right = r.right() - pad
 
         # --- tốc độ lớn ---
         rate_txt, rate_col = self._rate_display()
         f_rate = QFont()
-        f_rate.setPixelSize(17)
+        f_rate.setPixelSize(16)
         f_rate.setBold(True)
         p.setFont(f_rate)
         p.setPen(rate_col)
         p.drawText(
-            QRectF(x, y - 2, 120, 22),
+            QRectF(x, y - 2, 120, 20),
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
             rate_txt,
         )
@@ -215,18 +217,18 @@ class ThroughputMeter(QFrame):
         p.setFont(f_small)
         p.setPen(QColor("#8a95a1"))
         p.drawText(
-            QRectF(x + 62, y, 80, 18),
+            QRectF(x + 58, y, 80, 16),
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
             "tài khoản/giây",
         )
 
         # --- đếm hoàn thành + chấm sống ---
         f_base = QFont()
-        f_base.setPixelSize(FS_BASE)
+        f_base.setPixelSize(FS_SMALL)
         p.setFont(f_base)
         p.setPen(QColor("#1e2530"))
         p.drawText(
-            QRectF(x, y + 16, 150, 16),
+            QRectF(x, y + 13, 150, 15),
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
             f"{self._done:,} / {self._total:,}",
         )
@@ -236,11 +238,11 @@ class ThroughputMeter(QFrame):
             shade = (RUN_C, QColor("#6f9fd8"), QColor("#b6d0ec"))[self._phase]
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(shade)
-            p.drawEllipse(QPointF(x + 92, y + 24), 3, 3)
+            p.drawEllipse(QPointF(x + 88, y + 20), 3, 3)
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.setPen(RUN_C)
             p.drawText(
-                QRectF(x + 100, y + 16, 40, 16),
+                QRectF(x + 96, y + 13, 40, 15),
                 int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
                 "CHẠY",
             )
@@ -254,7 +256,7 @@ class ThroughputMeter(QFrame):
         else:
             eta_txt = "còn —"
         p.drawText(
-            QRectF(x, y + 32, 240, 14),
+            QRectF(x, y + 27, 240, 14),
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
             f"{eta_txt}   ·   {self._threads} luồng   ·   "
             f"✔{self._ok}  ✖{self._fail}",
@@ -266,7 +268,7 @@ class ThroughputMeter(QFrame):
             spark.setParent(self)
         w = min(150, max(70, int(r.width() * 0.34)))
         spark.setGeometry(
-            right - w, r.top() + 8, w, r.height() - 16
+            right - w, r.top() + 6, w, r.height() - 12
         )
         spark.show()
 
