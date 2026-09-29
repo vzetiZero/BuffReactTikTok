@@ -111,11 +111,11 @@ if not exist "cokie.tik.txt" (
     echo   [CANH BAO] Chua co file cokie.tik.txt trong thu muc nay.
     echo.
     echo   File nay KHONG duoc git clone ve - no chua cookie dang nhap
-    echo   (tuong duong mat khau) nen co chu dinh de khong lot ra cong
+    echo   ^(tuong duong mat khau^) nen co chu dinh de khong lot ra cong
     echo   khai bao.
     echo.
     echo   Hay copy file cookie cua ban vao day, ten dung: cokie.tik.txt
-    echo   Dinh dang: moi dong 1 tai khoan, 8 truong tach bang dau |
+    echo   Dinh dang: moi dong 1 tai khoan, 8 truong tach bang dau ^|
     echo.
 ) else (
     for /f %%n in ('type cokie.tik.txt ^| find /c /v ""') do set "NLINES=%%n"

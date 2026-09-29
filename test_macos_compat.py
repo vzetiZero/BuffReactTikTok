@@ -241,28 +241,39 @@ def main():
     # Da co sidecar chay san (ngoai app) thi KHONG duoc bat them mot cai
     # nua: cai moi khong bind duoc cong 8080, chet ngay, va app bao
     # "sidecar DA DUNG" — nguoi dung tuong app hong.
+    #
+    # PHẢI giả lập /health thay vì tin vao trang thai that: neu may dang
+    # khong co sidecar chay, _start_signer se that su bat mot tien trinh
+    # that — test se loan va con sidecar mo con.
     from PySide6.QtWidgets import QMessageBox as _QB
+    import core.signer as _sg
+
+    real_health = _sg.Signer.health
+    _sg.Signer.health = lambda self: {"ready": True, "generationCount": 7}
+
     w3 = MainWindow()
     for _ in range(3):
         app.processEvents()
-    ready_real = w3._signer_ready
-    proc_real = w3._signer_proc
     w3._signer_ready = False
     w3._signer_proc = None
     _QB.information = staticmethod(
         lambda *a, **k: _QB.StandardButton.Ok)
     _QB.warning = staticmethod(lambda *a, **k: _QB.StandardButton.Ok)
-    w3._start_signer()
-    for _ in range(8):
-        app.processEvents()
-    check("sidecar co san -> khong tao tien trinh moi",
-          w3._signer_proc, None)
-    check("sidecar co san -> danh dau san sang",
-          w3._signer_ready, True)
-    check("sidecar co san -> nhan hien 'sidecar v'",
-          w3.lbl_signer.text().strip().startswith("sidecar ✓"), True)
-    w3._signer_ready = ready_real
-    w3._signer_proc = proc_real
+    _QB.exec = staticmethod(lambda self=None, *a, **k: 0)
+    try:
+        w3._start_signer()
+        for _ in range(8):
+            app.processEvents()
+        check("sidecar co san -> khong tao tien trinh moi",
+              w3._signer_proc, None)
+        check("sidecar co san -> danh dau san sang",
+              w3._signer_ready, True)
+        check("sidecar co san -> nhan hien 'sidecar v'",
+              w3.lbl_signer.text().strip().startswith("sidecar ✓"), True)
+    finally:
+        _sg.Signer.health = real_health
+        w3._kill_signer()
+
     # phai giu lai cac dong log de chan doan khi sidecar chet
     check("co _signer_tail de chan doan",
           isinstance(w3._signer_tail, list), True)
@@ -273,6 +284,105 @@ def main():
           "Dòng cuối của sidecar" in src3, True)
     check("nhac dong 'cong 8080 da bi chiem'",
           "8080" in src3, True)
+
+    print("\n=== 11. File .bat phai thuan ASCII ===")
+    # Day la nguon goc cua loi "sidecar da dung" may phu. File .bat duoc
+    # doc byte theo code page cua Windows, va MOT ky tu da-cap nhu "-"
+    # (U+2014) se lam cmd cat sai dong -> lenh sai chay -> script dung.
+    # Da chung minh: bo ky tu non-ASCII thi script chay toi het.
+    for n in ("install.bat", "start.bat", "signer.bat", "setup.bat"):
+        f = ROOT / n
+        if not f.exists():
+            continue
+        raw = f.read_bytes()
+        bad_chars = []
+        txt = raw.decode("utf-8", "replace")
+        for i, line in enumerate(txt.splitlines(), 1):
+            for c in line:
+                if ord(c) > 127:
+                    bad_chars.append((i, c, hex(ord(c))))
+        check(f"{n} thuan ASCII (khong ky tu dac biet)", bad_chars[:3], [])
+        check(f"{n} khong co BOM",
+              raw[:3] == b"\xef\xbb\xbf", False)
+
+    # Va .bat phai CRLF (neu LF, cmd hay loi o lenh goto / khoi hanh nhieu dong)
+    for n in ("install.bat", "start.bat", "signer.bat", "setup.bat"):
+        f = ROOT / n
+        if not f.exists():
+            continue
+        raw = f.read_bytes()
+        lf = sum(1 for i, b in enumerate(raw)
+                 if b == 10 and (i == 0 or raw[i - 1] != 13))
+        check(f"{n} xuong dong CRLF", lf, 0)
+
+    print("\n=== 12. Ky tu dac biet trong echo ben trong khoi ngoac ===")
+    # cmd parse TAT CA khoi ( ... ) truoc khi chay BAT ky nhanh nao. Trong
+    # do, mot dau ( hoac ) khong escape trong text cua `echo` se bi hieu
+    # nham la dau ngoac cua khoi lenh, khong phai chu. Vi du:
+    #     if not exist "x" (
+    #         echo cai ...   <-- "(mot lan)" + "..." -> "... was unexpected"
+    #     )
+    # Da chung minh: chay signer.bat that, no im lang dung ngay sau [4/4].
+    SPECIALS = "&|<>"
+    for n in ("install.bat", "start.bat", "signer.bat", "setup.bat"):
+        f = ROOT / n
+        if not f.exists():
+            continue
+        txt = f.read_bytes().decode("utf-8", "replace")
+        depth, bad = 0, []
+        for i, line in enumerate(txt.splitlines(), 1):
+            s = line.strip()
+            up = s.upper()
+            if depth > 0 and (up.startswith("ECHO ") or up == "ECHO"):
+                # bo qua nhung ky tu da escape bang dau ^
+                plain, j = [], 0
+                while j < len(s):
+                    if s[j] == "^" and j + 1 < len(s):
+                        j += 2
+                        continue
+                    plain.append(s[j])
+                    j += 1
+                t = "".join(plain)
+                hits = [c for c in SPECIALS if c in t]
+                if hits:
+                    bad.append((i, " ".join(hits)))
+                if "(" in t or ")" in t:
+                    bad.append((i, "ngoac"))
+            # cap nhat do sau khoi, bo qua escape
+            j = 0
+            while j < len(s):
+                if s[j] == "^" and j + 1 < len(s):
+                    j += 2
+                    continue
+                if s[j] == "(":
+                    depth += 1
+                elif s[j] == ")":
+                    depth -= 1
+                j += 1
+            if s.startswith(")") and depth <= 0:
+                depth = 0
+        check(f"{n} echo trong khoi: escape ky tu dac biet", bad[:3], [])
+
+    print("\n=== 13. npm.cmd phai chay qua 'cmd /c' trong signer.bat ===")
+    # File .bat/.cmd (npm.cmd) KHONG phai .exe: no bam stdin cua chinh no va
+    # nuot mat cac dong con lai cua file .bat cha. Chay truc tiep
+    #     "npm.cmd" exec ... < nul
+    # lam signer.bat im lang dung ngay sau dong "[4/4]", sidecar khong bao
+    # gio khoi dong. Phai bo qua "cmd /c".
+    sbat = (ROOT / "signer.bat").read_bytes().decode("utf-8")
+    direct = [ln.strip() for ln in sbat.splitlines()
+              if ln.strip().startswith('"%NPM%"') and
+              not ln.strip().startswith('"%NPM%" start')]
+    check("khong goi npm.cmd truc tiep (can 'cmd /c')", direct, [])
+    check("npm exec duoc goi qua cmd /c",
+          'cmd /c ""%NPM%" exec' in sbat.replace("  ", " "), True)
+    check("npm install duoc goi qua cmd /c",
+          'cmd /c ""%NPM%" install"' in sbat, True)
+    # va phai tro PUPPETEER_EXECUTABLE_PATH qua file, khong ghi truc tiep
+    # node -e "...(ngoac)..." vao for /f (roi " "" " -> loi parse)
+    check("khong ghi node -e truc tiep vao for /f",
+          ("node -e" in sbat and "for /f" in sbat
+           and sbat.index("node -e") < sbat.index("for /f")), False)
 
     print(f"\n{'='*54}\n  {PASS} pass, {FAIL} fail\n{'='*54}")
     return 1 if FAIL else 0
