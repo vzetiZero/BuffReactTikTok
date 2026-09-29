@@ -610,9 +610,34 @@ class MainWindow(QMainWindow):
         # Chuột phải -> menu kiểm tra trạng thái tài khoản
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_table_menu)
+        # Delegate tự vẽ nên không có sẵn hình chữ nhật của từng ô; phải báo
+        # cho nó biết toạ độ bảng để tính vị trí ô tick khi bấm chuột.
+        self._sync_delegate_geometry()
+        self.table.verticalScrollBar().valueChanged.connect(
+            lambda *_: self._sync_delegate_geometry()
+        )
+        self.table.horizontalScrollBar().valueChanged.connect(
+            lambda *_: self._sync_delegate_geometry()
+        )
         v.addWidget(self.table, 1)
         v.addWidget(self._build_pager())
         return box
+
+    def _sync_delegate_geometry(self) -> None:
+        """Đẩy toạ độ thật của bảng xuống delegate.
+
+        Cột A có ô tick 11–13px; nếu delegate tự tính toạ độ theo giả định
+        (viewport đặt ở 0,0) thì bấm chuột sẽ trượt khỏi ô khi bảng đã
+        cuộn ngang hoặc co lại — lúc đó không tick được dòng nào.
+        """
+        if not hasattr(self, "delegate") or not hasattr(self, "table"):
+            return
+        h = self.table.horizontalHeader()
+        self.delegate.sync_geometry(
+            self.table.viewport().rect().topLeft(),
+            self.table.viewport().width(),
+            lambda c: h.sectionViewportPosition(c),
+        )
 
     def _apply_row_height(self) -> None:
         """Đặt chiều cao dòng thật sự.

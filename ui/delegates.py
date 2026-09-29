@@ -96,6 +96,16 @@ class AccountCellDelegate(QStyledItemDelegate):
     def __init__(self, parent=None, compact: bool = True):
         super().__init__(parent)
         self.compact = compact
+        # toạ độ bảng, do MainWindow đẩy vào qua sync_geometry() —
+        # delegate tự vẽ nên không có sẵn rect của từng ô như view.
+        self._view_origin = QPoint(0, 0)
+        self._view_width = 200
+        self._col_offset = None
+        # trạng thái đang quét chuột: dòng bắt đầu, dòng hiện tại, và
+        # trạng thái đang áp (tick hay bỏ tick). None = không quét.
+        self._sweep_from: int | None = None
+        self._sweep_to: int | None = None
+        self._sweep_on = False
 
     def sizeHint(self, option, index) -> QSize:  # noqa: N802
         # `option` có thể là None khi Qt hỏi kích thước ngoài ngữ cảnh vẽ
@@ -105,6 +115,42 @@ class AccountCellDelegate(QStyledItemDelegate):
 
     def row_h(self) -> int:
         return ROW_H if self.compact else ROW_H_TALL
+
+    def box_rect(self, row: int, col: int) -> QRect:
+        """Hình chữ nhật của Ô TICK ở cột A, tính cùng công thức với lúc vẽ.
+
+        Tách riêng ra để hai nơi dùng CHUNG một nguồn: paint() vẽ, còn
+        editorEvent() cần biết chuột có nằm trong ô hay không. Nếu mỗi
+        bên tự tính, rất dễ lệch 1-2px và bấm vào ô mà không ăn.
+        """
+        rect = self._cell_rect(row, col)
+        box = 11 if self.compact else 13
+        return QRect(
+            rect.left() + NUM_W + PAD,
+            rect.top() + (rect.height() - box) // 2,
+            box, box,
+        )
+
+    def _cell_rect(self, row: int, col: int) -> QRect:
+        rect = QRect(
+            self._view_origin.x(),
+            self._view_origin.y() + row * self.row_h(),
+            self._view_width,
+            self.row_h(),
+        )
+        if col:
+            rect.moveLeft(self._view_origin.x() + self._col_x(col))
+        return rect
+
+    def sync_geometry(self, origin: QPoint, width: int,
+                      col_x: "callable | None" = None) -> None:
+        """Cập nhật toạ độ bảng để box_rect() trả về đúng vị trí thật."""
+        self._view_origin = QPoint(origin)
+        self._view_width = width
+        self._col_offset = col_x
+
+    def _col_x(self, col: int) -> int:
+        return self._col_offset(col) if self._col_offset else 0
 
     @staticmethod
     def _text_area(rect: QRect, used_left: int) -> tuple[int, int]:
@@ -263,14 +309,11 @@ class AccountCellDelegate(QStyledItemDelegate):
         ok_session = index.data(HAS_SESSION_ROLE) is not False
 
         # --- ô tick ---
-        box = 11 if self.compact else 13
+        # Dùng CHUNG box_rect() với editorEvent() để bấm chuột trúng ô
+        # vẽ ra, không lệch vài px.
         checked = index.data(Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked
         cb = QStyleOptionButton()
-        cb.rect = QRect(
-            rect.left() + NUM_W + PAD,
-            rect.top() + (rect.height() - box) // 2,
-            box, box,
-        )
+        cb.rect = self.box_rect(index.row(), index.column())
         cb.state = QStyle.StateFlag.State_Enabled
         cb.state |= QStyle.StateFlag.State_On if checked else QStyle.StateFlag.State_Off
         QApplication.style().drawControl(QStyle.ControlElement.CE_CheckBox, cb, painter)
@@ -400,15 +443,92 @@ class AccountCellDelegate(QStyledItemDelegate):
 
     # ------------------------------------------------------------------ #
     def editorEvent(self, event, model, option, index) -> bool:  # noqa: N802
-        """Bấm vào ô tick để bật/tắt tài khoản."""
+        """Bấm vào Ô TICK ở cột A để bật/tắt tài khoản.
+
+        Cần phân biệt 3 vùng, nếu không sẽ nuốt mọi cú bấm ở cột A:
+
+          1. ô tick           -> bật/tắt tài khoản (delegate xử lý)
+          2. phần chữ, số STT -> chọn dòng, và CHUỘT PHẢI phải mở được
+                                menu ngữ cảnh -> trả False để bảng xử lý
+          3. cột B, C          -> không đụng, trả False
+
+        Lỗi đã gặp: bản cũ trả True cho MỌI MouseButtonRelease ở cột A
+        (kể cả chuột phải) nên không mở nổi menu ngữ cảnh, và bấm vào
+        phần chữ cũng không chọn được dòng.
+        """
         if index.column() != AccountTableModel.COL_ACCOUNT:
             return False
-        if event.type() == QEvent.Type.MouseButtonRelease:
-            cur = index.data(Qt.ItemDataRole.CheckStateRole)
-            new = (Qt.CheckState.Unchecked
-                   if cur == Qt.CheckState.Checked else Qt.CheckState.Checked)
-            model.setData(index, new, Qt.ItemDataRole.CheckStateRole)
+
+        et = event.type()
+
+        # Chuột phải / giữa: KHÔNG đụng — để bảng mở menu ngữ cảnh.
+        # Phải kiểm kể cả MouseButtonPress, vì nếu nuốt press thì bảng
+        # không báo hiện chuột phải và menu không bao giờ hiện.
+        if et in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
+            if event.button() != Qt.MouseButton.LeftButton:
+                return False
+            if not self._in_box(event, index):
+                return False
+            # Bắt đầu quét: đảo trạng thái dòng này trước. Kéo sẽ áp
+            # ĐÚNG trạng thái vừa đảo cho mọi dòng quét qua — giống
+            # quét ô trong Excel.
+            want = not (index.data(Qt.ItemDataRole.CheckStateRole)
+                        == Qt.CheckState.Checked)
+            model.setData(index, Qt.CheckState.Checked if want
+                          else Qt.CheckState.Unchecked,
+                          Qt.ItemDataRole.CheckStateRole)
+            self._sweep_from = index.row()
+            self._sweep_to = index.row()
+            self._sweep_on = want
             return True
-        if event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseMove):
+
+        if et == QEvent.Type.MouseButtonRelease:
+            if event.button() != Qt.MouseButton.LeftButton:
+                return False
+            if self._sweep_from is None:
+                return False
+            self._sweep_from = None
+            self._sweep_to = None
+            self._sweep_on = False
             return True
+
+        if et == QEvent.Type.MouseMove:
+            if self._sweep_from is None or self._sweep_to is None:
+                return False
+            row = self._row_at(event)
+            if row is None or row == self._sweep_to:
+                return True
+            # Quét tới đâu áp trạng thái tới đó. set_range_selected chỉ
+            # vẽ lại vùng vừa đổi nên quét nghìn dòng vẫn mượt.
+            if hasattr(model, "set_range_selected"):
+                model.set_range_selected(self._sweep_to, row, self._sweep_on)
+            self._sweep_to = row
+            return True
+
         return False
+
+    def _row_at(self, event) -> int | None:
+        """Dòng đang chuột ở, tính theo Y trong viewport."""
+        try:
+            pos = event.position().toPoint()
+        except AttributeError:
+            pos = event.pos()      # Qt5 / QMouseEvent cũ
+        if pos.y() < 0 or pos.x() < 0:
+            return None
+        return max(0, pos.y() // self.row_h())
+
+    def _in_box(self, event, index) -> bool:
+        """Chuột có nằm trong ô tick của dòng `index` không (nới lề 3px).
+
+        Nới lề vì ô tick chỉ 11–13px — bấm sát mép mà trượt 1px là
+        bấm trúng phần chữ, mà bấm phần chữ thì KHÔNG được tick.
+        """
+        try:
+            pos = event.position().toPoint()
+        except AttributeError:
+            pos = event.pos()      # Qt5 / QMouseEvent cũ
+        return self.box_rect(index.row(), index.column()).contains(
+            pos, self.BOX_PAD)
+
+    # nới lề bấm cho ô tick, px
+    BOX_PAD = 3

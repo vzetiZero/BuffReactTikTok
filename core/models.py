@@ -707,6 +707,34 @@ class AccountTableModel(QAbstractTableModel):
         self.dataChanged.emit(index, index)
         return True
 
+    def set_range_selected(self, r0: int, r1: int, checked: bool) -> int:
+        """Tick/bỏ tick một DẢI dòng liên tiếp — dùng cho thao tác quét chuột.
+
+        `r0`/`r1` là chỉ số dòng trên bảng (đã qua lọc), thứ tự không
+        quan trọng. Trả về số tài khoản THỰC SỰ đổi trạng thái, để
+        lần quét sau không báo nhầm là đã đổi khi không có gì đổi.
+
+        Vẽ lại bằng một lần `dataChanged` cho cả khoảng thay vì mỗi
+        dòng một lần — quét 3.000 dòng sẽ nhanh hơn hẳn.
+        """
+        if r0 > r1:
+            r0, r1 = r1, r0
+        start, end = self.page_slice()
+        # cắt theo vùng đang hiện — row index ngoài trang này vô nghĩa
+        lo, hi = max(r0, start - start), min(r1, end - start - 1)
+        if lo > hi:
+            return 0
+        n = 0
+        for row in range(lo, hi + 1):
+            acc = self._view[start + row]
+            if acc.selected != checked:
+                acc.selected = checked
+                n += 1
+        if n:
+            self.dataChanged.emit(self.index(lo, self.COL_ACCOUNT),
+                                  self.index(hi, self.COL_ACCOUNT))
+        return n
+
     def flags(self, index: QModelIndex):
         if not index.isValid():
             return Qt.ItemFlag.NoItemFlags
