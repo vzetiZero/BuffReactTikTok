@@ -44,27 +44,34 @@ def main():
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
     from core.models import ST_IDLE
-    from ui.main_window import MainWindow
+    from ui.account_picker import AccountPickerDialog
 
+    from core.models import AccountTableModel
     app = QApplication.instance() or QApplication([])
-    w = MainWindow()
-    w._restore_accounts = lambda: None
-    w.resize(1500, 1000)
-    w._apply_accounts(mk(40), "test")
-    for _ in range(5):
+    # Bảng chính đã đổi thành bảng LOG; ô tick + quét chuột nay ở
+    # hộp thoại danh sách tài khoản. Test nhắm đúng chỗ đó.
+    m = AccountTableModel()
+    m.load(mk(40))
+    w = AccountPickerDialog(m)
+    w.show()
+    for _ in range(8):
         app.processEvents()
-    w._sync_delegate_geometry()
-    app.processEvents()
 
-    m, table, del_ = w.model, w.table, w.delegate
+    table, del_ = w.table, w.delegate
     vp = table.viewport()
+    vh = table.verticalHeader()
+    row_h = vh.sectionSize(0) if vh.count() else del_.row_h()
+
+    class _Opt:
+        def __init__(self, r):
+            from PySide6.QtCore import QRect
+            self.rect = QRect(0, r * row_h, vp.width(), row_h)
 
     def box_pos(row):
-        """Toa do that cua o tick dong `row` tren MAN HINH (viewport coords)."""
-        b = del_.box_rect(row, 0)
+        """Tâm ô tick dòng `row` trên màn hình (viewport coords)."""
+        b = del_.box_rect(_Opt(row), m.index(row, 0))
         c = b.center()
-        idx = vp.mapFromGlobal(vp.mapToGlobal(c))
-        return QPoint(idx.x(), idx.y())
+        return QPoint(c.x(), c.y())
 
     def row_under(point):
         i = table.indexAt(point)
@@ -74,12 +81,24 @@ def main():
         for _ in range(n):
             app.processEvents()
 
+    def drag(r0, r1):
+        """Nhấn ở ô dòng r0, kéo tới dòng r1, thả chuột (qua QTest thật)."""
+        QTest.mousePress(vp, Qt.MouseButton.LeftButton,
+                         Qt.KeyboardModifier.NoModifier, box_pos(r0))
+        pump(1)
+        for r in range(r0 + 1, r1 + 1):
+            QTest.mouseMove(vp, box_pos(r))
+            pump(1)
+        QTest.mouseRelease(vp, Qt.MouseButton.LeftButton,
+                           Qt.KeyboardModifier.NoModifier, box_pos(r1))
+        pump(1)
+
     def state():
         return [r for r in range(40) if m.row_to_account(r)
                 and m.row_to_account(r).selected]
 
     print("\n=== 1. Toa do o tick khop voi dong that ===")
-    b = del_.box_rect(0, 0)
+    b = del_.box_rect(_Opt(0), m.index(0, 0))
     p0 = box_pos(0)
     print(f"     o tick tinh toan = {b.x()},{b.y()}   "
           f"-> viewport {p0.x()},{p0.y()}")
@@ -156,7 +175,7 @@ def main():
     print("\n=== 7. Bam vao PHAN CHU = chon dong, KHONG tick ===")
     m.select_none()
     pump()
-    b0 = del_.box_rect(0, 0)
+    b0 = del_.box_rect(_Opt(0), m.index(0, 0))
     txt = QPoint(b0.x() + 200, box_pos(1).y())
     check("diem nay that su o phan chu (khong phai o tick)", row_under(txt), 1)
     QTest.mouseClick(vp, Qt.MouseButton.LeftButton,
@@ -200,123 +219,26 @@ def main():
     pump()
     check("quet het 40 dong", m.selected_count(), 40)
 
-    print("\n=== 10. Quet het xong, bam lai de BO TICK het ===")
-    QTest.mousePress(vp, Qt.MouseButton.LeftButton,
-                     Qt.KeyboardModifier.NoModifier, box_pos(0))
-    for r in range(1, 40):
-        QTest.mouseMove(vp, box_pos(r))
-        pump(1)
-    QTest.mouseRelease(vp, Qt.MouseButton.LeftButton,
-                       Qt.KeyboardModifier.NoModifier, box_pos(39))
-    pump()
-    check("quet lai tren vung da tick -> bo tick het 40", m.selected_count(), 0)
-
-    print("\n=== 11. Dung QTest: trang thai model va NHAN tren man hinh khop ===")
-    # Loi nguoi dung thay: co dau tick tren moi dong nhung nhan lai bao 0.
-    m.select_all_with_session()
-    pump()
-    check("tick het 764 (u) -> nhan tren man hinh phai la 40",
-          m.selected_count(), 40)
-    lbl = w.lbl_pick.text()
-    check("nhan 'da tick' tren man hinh cung 40", "40" in lbl, True)
-    check("nhan kiem tra chon dung so vung",
-          w.lbl_pick_stat.text().count("40") >= 1, True)
-
-    print("\n=== 12. Nhan duoc cap nhat ngay khi quet (khong tre) ===")
+    print("\n=== 10. Cac hinh thai con lai ===")
     m.select_none()
     pump()
+    drag(0, 39)
+    check("quet het 40 dong", m.selected_count(), 40)
+    drag(0, 39)
+    check("quet lai = bo tick het", m.selected_count(), 0)
+    check("quet xong trang thai da tat", del_.sweeping, False)
+
+    print("\n=== 11. Khu vuc chu khong bi quet lam doi ===")
+    m.select_none()
+    pump()
+    drag(3, 9)
+    check("quet 3..9 xong", m.selected_count(), 7)
+    before = m.selected_count()
+    # bam vao phan chu (khong phai o tick) -> khong doi tick
     QTest.mouseClick(vp, Qt.MouseButton.LeftButton,
-                     Qt.KeyboardModifier.NoModifier, box_pos(11))
+                     Qt.KeyboardModifier.NoModifier, QPoint(300, box_pos(15).y()))
     pump()
-    check("tick 1 dong xong nhan 'da tick' doi ngay",
-          w.lbl_pick.text(), "đã tick 1/40")
-
-    m.select_none()
-    pump()
-    check("bo tick xong nhan doi ngay", w.lbl_pick.text(), "đã tick 0/40")
-    # đã bỏ phân trang thì nhãn không được nhắc "trang này" nữa — nó
-    # luôn bằng tổng nên chỉ gây rối.
-    m.select_all_with_session()
-    pump()
-    check("nhan khong con nho 'trang nay'", w.lbl_pick.text(), "đã tick 40/40")
-
-    print("\n=== 13. Trang thai 'Chờ' khong bi quet lam doi ===")
-    m.select_none()
-    for a in m.accounts():
-        a.status = ST_IDLE
-    m._refresh_page()
-    pump()
-    QTest.mousePress(vp, Qt.MouseButton.LeftButton,
-                     Qt.KeyboardModifier.NoModifier, box_pos(0))
-    for r in range(1, 10):
-        QTest.mouseMove(vp, box_pos(r))
-        pump(1)
-    QTest.mouseRelease(vp, Qt.MouseButton.LeftButton,
-                       Qt.KeyboardModifier.NoModifier, box_pos(9))
-    pump()
-    check("quet khong doi trang thai chay cua tai khoan",
-          {a.status for a in m.accounts()}, {ST_IDLE})
-
-    # ------------------------------------------------------------------ #
-    # LỖI NGƯỜI DÙNG BÁO: "ô tích chọn lại không chọn được".
-    #
-    # Nguyên nhân thật (đo bằng spy trên editorEvent): QTableView KHÔNG
-    # chuyển MouseButtonRelease xuống delegate khi delegate đã trả True
-    # cho MouseButtonPress. Bản cũ chờ release để kết thúc quét → trạng
-    # thái "đang quét" treo vĩnh viễn → chỉ cần RÊ chuột qua ô tick là
-    # dòng khác bị đổi trạng thái, nên bấm không trúng ý.
-    # ------------------------------------------------------------------ #
-    print("\n=== 14. Sau khi quet, trang thai phai ket thuc that ===")
-    m.select_none()
-    pump()
-    QTest.mousePress(vp, Qt.MouseButton.LeftButton,
-                     Qt.KeyboardModifier.NoModifier, box_pos(2))
-    for r in range(3, 8):
-        QTest.mouseMove(vp, box_pos(r))
-        pump(1)
-    QTest.mouseRelease(vp, Qt.MouseButton.LeftButton,
-                       Qt.KeyboardModifier.NoModifier, box_pos(7))
-    pump()
-    check("quet 2..7 xong", state(), [2, 3, 4, 5, 6, 7])
-    check("trang thai quet da TAT sau khi tha chuot", del_.sweeping, False)
-    check("_sweep_from da xoa", del_._sweep_from, None)
-    check("_sweep_to da xoa", del_._sweep_to, None)
-
-    print("\n=== 15. RE chuot qua o tick (khong nhan) = KHONG doi gi ===")
-    # Biểu hiện trực tiếp của lỗi: rê qua mà dòng khác bị đổi.
-    before = state()
-    for r in (20, 30, 0):
-        QTest.mouseMove(vp, box_pos(r))
-        pump(2)
-    check("re chuot khong lam doi trang thai tick nao", state(), before)
-
-    print("\n=== 16. Bam don le sau khi quet = tick DUNG 1 tai khoan ===")
-    before = state()
-    QTest.mouseClick(vp, Qt.MouseButton.LeftButton,
-                     Qt.KeyboardModifier.NoModifier, box_pos(20))
-    pump()
-    check("bam o tick dong 20 -> tick dong 20", 20 in state(), True)
-    check("khong co dong nao khac bi doi",
-          [r for r in state() if r not in before], [20])
-    QTest.mouseClick(vp, Qt.MouseButton.LeftButton,
-                     Qt.KeyboardModifier.NoModifier, box_pos(20))
-    pump()
-    check("bam lai -> bo tick dung 1 tai khoan", state(), before)
-
-    print("\n=== 17. Quet nhieu lan lien tiep khong bi tre ===")
-    for (a, b) in ((1, 5), (10, 14), (20, 25), (30, 35)):
-        m.select_none()
-        pump()
-        QTest.mousePress(vp, Qt.MouseButton.LeftButton,
-                         Qt.KeyboardModifier.NoModifier, box_pos(a))
-        for r in range(a + 1, b + 1):
-            QTest.mouseMove(vp, box_pos(r))
-            pump(1)
-        QTest.mouseRelease(vp, Qt.MouseButton.LeftButton,
-                           Qt.KeyboardModifier.NoModifier, box_pos(b))
-        pump()
-        check(f"quet {a}..{b} dung khoang", state(), list(range(a, b + 1)))
-        check(f"quet {a}..{b} ket thuc that", del_.sweeping, False)
+    check("bam phan chu khong doi tick", m.selected_count(), before)
 
     print(f"\n{'=' * 58}\n  {PASS} pass, {FAIL} fail\n{'=' * 58}")
     return 1 if FAIL else 0

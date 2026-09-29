@@ -50,18 +50,20 @@ def main():
     from PySide6.QtGui import QMouseEvent
     from PySide6.QtWidgets import QApplication
     from core.models import AccountTableModel
-    from ui.main_window import MainWindow
+    from ui.account_picker import AccountPickerDialog
 
+    from core.models import AccountTableModel
     app = QApplication.instance() or QApplication([])
-    w = MainWindow()
-    w._restore_accounts = lambda: None
-    w._apply_accounts(mk(20), "test")
-    for _ in range(4):
+    # Ô tick + quét chuột nay nằm trong hộp thoại danh sách tài khoản
+    # (bảng chính đã đổi thành bảng log chạy). Test nhắm đúng chỗ đó.
+    m = AccountTableModel()
+    m.load(mk(20))
+    w = AccountPickerDialog(m)
+    w.show()          # visualRect chỉ đúng khi widget đã hiển thị
+    for _ in range(6):
         app.processEvents()
-    w._sync_delegate_geometry()
-    app.processEvents()
 
-    m, table, del_ = w.model, w.table, w.delegate
+    table, del_ = w.table, w.delegate
 
     def send(kind, pos, row, button=Qt.MouseButton.LeftButton,
              at_btn=Qt.MouseButton.LeftButton, col=0):
@@ -69,8 +71,27 @@ def main():
                          button, at_btn, Qt.KeyboardModifier.NoModifier)
         return del_.editorEvent(ev, m, None, m.index(row, col))
 
+    def opt_rect(row):
+        """Rect của ô dòng `row`, giống hệt option.rect mà Qt dùng.
+
+        `visualRect()` trả về rect rỗng dưới nền offscreen (giới hạn
+        môi trường test, không phải lỗi app). Ở đây bảng KHÔNG cuộn,
+        nên rect đúng là row * row_h — tự dựng cho khớp.
+        """
+        from PySide6.QtCore import QRect
+        # Dùng chiều cao dòng THẬT của bảng, không phải row_h() của
+        # delegate: hộp thoại đặt section 18px nên hai giá trị lệch nhau.
+        vh = table.verticalHeader()
+        h = vh.sectionSize(0) if vh.count() else del_.row_h()
+        return QRect(0, row * h, table.viewport().width(), h)
+
     def box_at(row):
-        return del_.box_rect(row, 0).center()
+        idx = m.index(row, 0)
+
+        class _Opt:
+            rect = opt_rect(row)
+
+        return del_.box_rect(_Opt(), idx).center()
 
     def click(row):
         """Bấm đơn lẻ: delegate xử lý ngay ở MouseButtonPress, rồi
@@ -89,13 +110,13 @@ def main():
                 if m.row_to_account(r) and m.row_to_account(r).selected]
 
     print("\n=== 1. Toa do o tick ===")
-    box = del_.box_rect(0, 0)
+    box = del_.box_rect(type('O', (), {'rect': opt_rect(0)})(), m.index(0, 0))
     check("o tick nam trong cot A (x >= 0)", box.x() >= 0, True)
     check("o tick be rong hop ly", 0 < box.width() <= 30, True)
     check("o tick o ben phai so voi so thu tu, truoc phan chu",
           box.x() >= 30, True)
     check("o tick cua dong 0 va dong 19 khac nhau",
-          del_.box_rect(0, 0).y() != del_.box_rect(19, 0).y(), True)
+          box_at(0).y() != box_at(19).y(), True)
     print(f"     o tick = {box.x()},{box.y()} {box.width()}x{box.height()}")
 
     print("\n=== 2. Click don le vao o tick ===")

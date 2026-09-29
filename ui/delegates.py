@@ -96,11 +96,10 @@ class AccountCellDelegate(QStyledItemDelegate):
     def __init__(self, parent=None, compact: bool = True):
         super().__init__(parent)
         self.compact = compact
-        # toạ độ bảng, do MainWindow đẩy vào qua sync_geometry() —
-        # delegate tự vẽ nên không có sẵn rect của từng ô như view.
-        self._view_origin = QPoint(0, 0)
-        self._view_width = 200
-        self._col_offset = None
+        # bảng chủ sở hữu — dùng để hỏi vị trí thật (row_at). Delegate
+        # tự vẽ nên không có rect từng ô, nhưng indexAt() của view thì
+        # luôn đúng kể cả sau khi cuộn.
+        self._view = None
         # trạng thái đang quét chuột: dòng bắt đầu, dòng hiện tại, và
         # trạng thái đang áp (tick hay bỏ tick). None = không quét.
         self._sweep_from: int | None = None
@@ -117,14 +116,23 @@ class AccountCellDelegate(QStyledItemDelegate):
     def row_h(self) -> int:
         return ROW_H if self.compact else ROW_H_TALL
 
-    def box_rect(self, row: int, col: int) -> QRect:
-        """Hình chữ nhật của Ô TICK ở cột A, tính cùng công thức với lúc vẽ.
+    # Nới lề bấm cho ô tick, px. Ô chỉ 11-13px nên bấm sát mép trượt
+    # 1px là rơi vào phần chữ, mà bấm phần chữ thì KHÔNG tick.
+    BOX_PAD = 3
 
-        Tách riêng ra để hai nơi dùng CHUNG một nguồn: paint() vẽ, còn
-        editorEvent() cần biết chuột có nằm trong ô hay không. Nếu mỗi
-        bên tự tính, rất dễ lệch 1-2px và bấm vào ô mà không ăn.
+    def box_rect(self, option, index) -> QRect:
+        """Hình chữ nhật ô tick, tính TỪ `option.rect` mà Qt đưa cho.
+
+        ⚠ KHÔNG tự tính toạ độ từ `row * row_h()`. Đo thật: khi bảng
+        cuộn xuống 200 dòng, cách tự tính lệch 201px so với chỗ Qt vẽ,
+        nên ô tick hiện sai chỗ và bấm chuột rơi nhầm dòng — triệu
+        chứng là "quét rồi mà ô không thấy tích".
+
+        Bỏ phân trang nên bảng rất dài và luôn phải cuộn, nên đây không
+        phải chuyện hiếm. `option.rect` là toạ độ thật do Qt tính, luôn
+        đúng dù đã cuộn tới đâu.
         """
-        rect = self._cell_rect(row, col)
+        rect = option.rect
         box = 11 if self.compact else 13
         return QRect(
             rect.left() + NUM_W + PAD,
@@ -132,26 +140,21 @@ class AccountCellDelegate(QStyledItemDelegate):
             box, box,
         )
 
-    def _cell_rect(self, row: int, col: int) -> QRect:
-        rect = QRect(
-            self._view_origin.x(),
-            self._view_origin.y() + row * self.row_h(),
-            self._view_width,
-            self.row_h(),
-        )
-        if col:
-            rect.moveLeft(self._view_origin.x() + self._col_x(col))
-        return rect
+    def row_at(self, pos: QPoint) -> int | None:
+        """Dòng thật sự dưới toạ độ viewport `pos`, hoặc None.
 
-    def sync_geometry(self, origin: QPoint, width: int,
-                      col_x: "callable | None" = None) -> None:
-        """Cập nhật toạ độ bảng để box_rect() trả về đúng vị trí thật."""
-        self._view_origin = QPoint(origin)
-        self._view_width = width
-        self._col_offset = col_x
+        Hỏi chính bảng bằng `indexAt()` thay vì chia phép — như vậy tự
+        động đúng cả khi đã cuộn, khi lọc, khi sắp xếp.
+        """
+        view = self._view
+        if view is None:
+            return None
+        i = view.indexAt(pos)
+        return i.row() if i.isValid() else None
 
-    def _col_x(self, col: int) -> int:
-        return self._col_offset(col) if self._col_offset else 0
+    def attach_view(self, view) -> None:
+        """Gắn bảng để delegate hỏi được vị trí thật (xem row_at)."""
+        self._view = view
 
     @staticmethod
     def _text_area(rect: QRect, used_left: int) -> tuple[int, int]:
@@ -310,11 +313,11 @@ class AccountCellDelegate(QStyledItemDelegate):
         ok_session = index.data(HAS_SESSION_ROLE) is not False
 
         # --- ô tick ---
-        # Dùng CHUNG box_rect() với editorEvent() để bấm chuột trúng ô
-        # vẽ ra, không lệch vài px.
+        # box_rect() lấy từ option.rect của Qt nên luôn khớp chỗ vẽ,
+        # kể cả khi bảng đã cuộn (tính tay thì lệch hàng trăm px).
         checked = index.data(Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked
         cb = QStyleOptionButton()
-        cb.rect = self.box_rect(index.row(), index.column())
+        cb.rect = self.box_rect(option, index)
         cb.state = QStyle.StateFlag.State_Enabled
         cb.state |= QStyle.StateFlag.State_On if checked else QStyle.StateFlag.State_Off
         QApplication.style().drawControl(QStyle.ControlElement.CE_CheckBox, cb, painter)
@@ -494,11 +497,11 @@ class AccountCellDelegate(QStyledItemDelegate):
         if et == QEvent.Type.MouseMove:
             if self._sweep_from is None or self._sweep_to is None:
                 return False
-            row = self._row_at(event)
+            row = self.row_at(_event_pos(event))
             if row is None or row == self._sweep_to:
                 return True
-            # Quet toi dau ap trang thai toi do. set_range_selected chi
-            # ve lai vung vua doi nen quet nghin dong van muot.
+            # Quét tới đâu áp trạng thái tới đó. set_range_selected chỉ
+            # vẽ lại vùng vừa đổi nên quét nghìn dòng vẫn mượt.
             if hasattr(model, "set_range_selected"):
                 model.set_range_selected(self._sweep_to, row, self._sweep_on)
             self._sweep_to = row
@@ -518,17 +521,15 @@ class AccountCellDelegate(QStyledItemDelegate):
         return self._sweep_from is not None
 
     def eventFilter(self, obj, event):  # noqa: N802
-        """Bắt MouseButtonRelease để kết thúc quét.
+        """Bat MouseButtonRelease de ket thuc quet.
 
-        Gắn lên viewport của bảng. Delegate KHÔNG bao giờ thấy release
-        (xem ghi chú ở editorEvent), nên phải bắt ở tầng cao hơn — nơi
-        Qt vẫn gửi tới. Chỉ bắt để dọn trạng thái rồi trả về False,
-        nên không chặn bất kỳ hành vi mặc định nào của QTableView
-        (kể cả chuột phải và kéo chọn dải).
+        Gan len viewport cua bang. Delegate KHONG bao gio thay release
+        (xem ghi chu o editorEvent), nen phai bat o tang cao hon. Chi bat
+        de don trang thai roi tra False, nen khong chan bat ky hanh vi
+        mac dinh nao cua QTableView (ke ca chuot phai va keo chon dai).
 
-        Ngoài ra bắt cả việc thả chuột RA NGOÀI cửa sổ: khi đó
-        viewport không nhận release, quét sẽ treo vĩnh viễn và mọi
-        lần rê chuột sau đó đều đổi trạng thái nhầm.
+        Bun giu viec tha chuot RA NGOAI cua so: luc do viewport khong
+        nhan release, quet se treo vinh vien.
         """
         if event.type() in (QEvent.Type.MouseButtonRelease,
                             QEvent.Type.UngrabMouse):
@@ -537,66 +538,66 @@ class AccountCellDelegate(QStyledItemDelegate):
                         event.button() != Qt.MouseButton.LeftButton:
                     return super().eventFilter(obj, event)
             if self._sweep_from is not None:
-                # Chuột vừa thả ở dòng nào đó; nếu dòng đó CHƯA được
-                # quét tới (thả nhanh quá, không kịp có MouseMove) thì
-                # áp nốt trạng thái cho nó — nếu không dòng cuối cùng
-                # sẽ bị bỏ sót dù người dùng thấy mình vừa quét tới.
-                try:
-                    pos = event.position().toPoint()
-                except AttributeError:
-                    pos = event.pos()
-                row = self._row_at(_FakePoint(pos))
-                model = getattr(self, "_sweep_model", None)
+                # Chuot vua tha o dong nao do; neu dong do CHUA duoc quet
+                # toi (tha nhanh qua, khong kip co MouseMove) thi ap not
+                # trang thai cho no -- neu khong dong cuoi cung se bi bo
+                # sot du nguoi dung thay minh vua quet toi.
+                pos = _event_pos(event)
+                row = self.row_at(pos)
+                model = self._sweep_model
                 if row is not None and row != self._sweep_to and model \
                         and hasattr(model, "set_range_selected"):
-                    model.set_range_selected(self._sweep_to or row, row,
-                                             self._sweep_on)
+                    model.set_range_selected(
+                        self._sweep_to if self._sweep_to is not None else row,
+                        row, self._sweep_on)
                 self.end_sweep()
         return super().eventFilter(obj, event)
 
     def attach_sweep_filter(self, viewport) -> None:
         viewport.installEventFilter(self)
 
-    def _row_at(self, event) -> int | None:
-        """Dòng đang chuột ở, tính theo Y trong viewport."""
-        try:
-            pos = event.position().toPoint()
-        except AttributeError:
-            pos = event.pos()      # Qt5 / QMouseEvent cũ
-        if pos.y() < 0 or pos.x() < 0:
-            return None
-        return max(0, pos.y() // self.row_h())
-
     def _in_box(self, event, index) -> bool:
         """Chuột có nằm trong ô tick của dòng `index` không (nới lề 3px).
 
-        Nới lề vì ô tick chỉ 11–13px — bấm sát mép mà trượt 1px là
-        bấm trúng phần chữ, mà bấm phần chữ thì KHÔNG được tick.
+        Tính ĐÚNG theo cùng công thức mà paint() dùng — cùng một nguồn,
+        không tự suy ra toạ độ riêng. Trước đây `_in_box` tự tính bằng
+        `_row_top()` còn paint dùng `option.rect`, hai nguồn lệch nhau
+        vài px thì bấm trúng ô mà không ăn.
         """
-        try:
-            pos = event.position().toPoint()
-        except AttributeError:
-            pos = event.pos()      # Qt5 / QMouseEvent cũ
-        return self.box_rect(index.row(), index.column()).contains(
-            pos, self.BOX_PAD)
+        pos = _event_pos(event)
+        if pos.y() < 0 or pos.x() < 0:
+            return False
+        top = self._row_top(index.row())
+        if top is None:
+            return False
+        box = 11 if self.compact else 13
+        cell = QRect(NUM_W + PAD, top + (self.row_h() - box) // 2, box, box)
+        return cell.contains(pos, self.BOX_PAD)
 
-    # nới lề bấm cho ô tick, px
-    BOX_PAD = 3
+    def _row_top(self, row: int) -> int | None:
+        """Y trong viewport của dòng `row`, lấy từ chính bảng.
 
+        `visualRect()` của QTableView đã tính sẵn phần cuộn. Tính tay
+        bằng `row * row_h()` thì sai ngay khi bảng cuộn — do bỏ phân
+        trang, danh sách rất dài và luôn phải cuộn.
 
-class _FakePoint:
-    """Bọc QPoint thành object có `position()`, y hệt QMouseEvent.
+        `visualRect()` trả rect rỗng khi bảng chưa từng được vẽ (ví dụ
+        trong test offscreen), nên có đường dự phòng: nếu bảng chưa cuộn
+        thì `row * row_h()` vẫn đúng.
+        """
+        view = self._view
+        if view is None:
+            return None
+        r = view.visualRect(view.model().index(row, 0))
+        if r.isValid() and r.height() > 0:
+            return r.y()
+        if view.verticalScrollBar().value() == 0:
+            return row * self.row_h()
+        return None
 
-    `_row_at()` nhận sự kiện chuột; ở eventFilter ta chỉ có QPoint, nên
-    bọc lại cho dùng chung một hàm thay vì viết lại phép tính.
-    """
-
-    __slots__ = ("_p",)
-
-    def __init__(self, p: QPoint):
-        self._p = p
-
-    def position(self):
-        from PySide6.QtCore import QPointF
-        return QPointF(self._p)
-
+def _event_pos(event) -> QPoint:
+    """Toa do con tro cua su kien chuot (ho tro ca Qt5 va Qt6)."""
+    try:
+        return event.position().toPoint()
+    except AttributeError:
+        return event.pos()

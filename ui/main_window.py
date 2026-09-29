@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSizePolicy,
     QSpinBox,
     QSplitter,
@@ -79,8 +80,10 @@ from core.settings import (
     save_accounts_cache,
 )
 from .delegates import AccountCellDelegate
+from .account_picker import AccountPickerDialog
 from .detail_panel import DetailPanel
 from .meter import ThroughputMeter
+from .runlog import RunLogModel, ST_DONE as LG_DONE, ST_FAIL as LG_FAIL, ST_OK as LG_OK, ST_RUN as LG_RUN
 from .settings_tab import SettingsTab
 
 # Tên script cài/chạy sidecar, đổi theo hệ điều hành. Trên macOS/Linux không
@@ -150,6 +153,8 @@ class MainWindow(QMainWindow):
         # Trước đây chia 50 dòng 1 trang; với vài nghìn tài khoản thì
         # phải bấm « Trước / Sau » chỉ để xem hết — thừa thao tác.
         self.model.set_per_page(0)
+        # dùng cho chiều cao dòng của bảng log
+        self._compact_rows = self.settings.compact_rows
         self.accounts: list = []
         self.controller = RunController(
             lambda: build_backend(
@@ -306,21 +311,52 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.pbar)
         self.setCentralWidget(central)
 
-        self._build_account_tab(self.tab_main)
+        self._build_main_tab(self.tab_main)
         self._build_task_tab(self.tab_task)
         self._build_detail_tab(self.tab_detail)
 
     # ------------------------------------------------------------------ #
     # Tab 1 — bảng tài khoản chiếm trọn bề ngang
     # ------------------------------------------------------------------ #
-    def _build_account_tab(self, host: QWidget) -> None:
-        v = QVBoxLayout(host)
-        # Lề mỏng — mỗi px tiết kiệm ở đây đều tới bảng, để 50 dòng vừa
-        # khít màn 1080p mà không phải cuộn.
-        v.setContentsMargins(6, 5, 6, 5)
-        v.setSpacing(5)
-        v.addWidget(self._build_toolbar())
-        v.addWidget(self._build_table(), 1)
+    def _build_main_tab(self, host: QWidget) -> None:
+        """Màn chính: LOG chạy bên trái, CẤU HÌNH bên phải.
+
+        Không còn bảng danh sách tài khoản — nó là hàng trăm tới hàng
+        nghìn dòng, ép người dùng cuộc mãi mới thấy dòng vừa chạy xong.
+        Thứ cần nhìn lúc chạy là "tài khoản nào xong với cid nào", nên
+        bảng log là thứ chính; cấu hình đứng bên cạnh để không phải
+        chuyển qua lại giữa các tab.
+
+        Tài khoản vẫn nạp từ file cookie như cũ, và vẫn chọn được số
+        lượng / thứ tự / ngẫu nhiên ở nhóm "Số lượng tài khoản chạy".
+        """
+        h = QHBoxLayout(host)
+        h.setContentsMargins(6, 5, 6, 5)
+        h.setSpacing(8)
+
+        # --- trái: log chạy ---
+        left = QWidget()
+        lv = QVBoxLayout(left)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.setSpacing(4)
+        lv.addWidget(self._build_toolbar())
+        lv.addWidget(self._build_pager())
+        lv.addWidget(self._build_runlog(), 1)
+        h.addWidget(left, 1)
+
+        # --- phải: cấu hình tác vụ ---
+        right = QScrollArea()
+        right.setWidgetResizable(True)
+        right.setFrameShape(QFrame.Shape.NoFrame)
+        right.setMinimumWidth(330)
+        right.setMaximumWidth(430)
+        holder = QWidget()
+        hv = QVBoxLayout(holder)
+        hv.setContentsMargins(0, 0, 0, 0)
+        hv.addWidget(self._build_task())
+        hv.addStretch(1)
+        right.setWidget(holder)
+        h.addWidget(right)
 
     # ------------------------------------------------------------------ #
     # Tab 3 — thẻ bài viết, thẻ tài khoản, nhật ký
@@ -345,6 +381,138 @@ class MainWindow(QMainWindow):
         root.addWidget(self._build_task())
         root.addStretch(1)
 
+    def _build_runlog(self) -> QWidget:
+        """Bảng log chạy + thanh thống kê + ô danh sách cid đã xong."""
+        box = QGroupBox("Nhật ký chạy")
+        v = QVBoxLayout(box)
+        v.setSpacing(4)
+        v.setContentsMargins(6, 4, 6, 6)
+
+        # --- thanh thống kê: xong / thành công / lỗi ---
+        bar = QFrame()
+        bar.setProperty("role", "card")
+        hb = QHBoxLayout(bar)
+        hb.setContentsMargins(8, 2, 8, 2)
+        hb.setSpacing(10)
+        self.lbl_run_stat = QLabel("Chưa chạy gì.")
+        self.lbl_run_stat.setStyleSheet("font-weight:700;color:#1e9e5a;")
+        hb.addWidget(self.lbl_run_stat)
+        hb.addStretch(1)
+        b_clear = QPushButton("Xoá log")
+        b_clear.setObjectName("ghost")
+        b_clear.setToolTip("Xoá toàn bộ bảng log và danh sách cid đã xong.")
+        b_clear.clicked.connect(self._clear_runlog)
+        hb.addWidget(b_clear)
+        v.addWidget(bar)
+
+        # --- bảng ---
+        self.runlog = RunLogModel(self)
+        self.tbl_run = QTableView()
+        self.tbl_run.setModel(self.runlog)
+        self.tbl_run.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tbl_run.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tbl_run.verticalHeader().setVisible(False)
+        self.tbl_run.horizontalHeader().setHighlightSections(False)
+        self.tbl_run.horizontalHeader().setStretchLastSection(True)
+        # Chuột phải trên bảng log -> menu chạy / quản lý danh sách
+        self.tbl_run.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tbl_run.customContextMenuRequested.connect(
+            self._show_table_menu)
+        self.tbl_run.setColumnWidth(0, 190)   # STT + tài khoản
+        self.tbl_run.setColumnWidth(1, 175)   # cid
+        self.tbl_run.setColumnWidth(2, 300)   # log
+        vh = self.tbl_run.verticalHeader()
+        vh.setMinimumSectionSize(18)
+        vh.setDefaultSectionSize(18)
+        v.addWidget(self.tbl_run, 1)
+
+        # --- danh sách cid đã hoàn thành ---
+        gb_done = QGroupBox("CID đã hoàn thành")
+        gd = QVBoxLayout(gb_done)
+        gd.setContentsMargins(6, 4, 6, 6)
+        gd.setSpacing(3)
+        self.lbl_done_cid = QLabel("Chưa có cid nào hoàn thành.")
+        self.lbl_done_cid.setProperty("role", "hint")
+        self.lbl_done_cid.setWordWrap(True)
+        gd.addWidget(self.lbl_done_cid)
+        self.in_done_cid = QTextEdit()
+        self.in_done_cid.setReadOnly(True)
+        self.in_done_cid.setPlaceholderText(
+            "Các cid đã chạy xong sẽ hiện ở đây,\nmỗi dòng một cid.")
+        self.in_done_cid.setFixedHeight(84)
+        self.in_done_cid.setAcceptRichText(False)
+        gd.addWidget(self.in_done_cid)
+        hcb = QHBoxLayout()
+        hcb.setSpacing(4)
+        b_copy = QPushButton("Sao chép tất cả cid đã xong")
+        b_copy.setObjectName("ghost")
+        b_copy.clicked.connect(self._copy_done_cids)
+        hcb.addWidget(b_copy)
+        b_n = QPushButton("Bỏ trống")
+        b_n.setObjectName("ghost")
+        b_n.setToolTip("Xoá danh sách cid đã xong, giữ nguyên bảng log.")
+        b_n.clicked.connect(self._clear_done_cids)
+        hcb.addWidget(b_n)
+        hcb.addStretch(1)
+        gd.addLayout(hcb)
+        v.addWidget(gb_done)
+        return box
+
+    def _clear_runlog(self) -> None:
+        self.runlog.reset()
+        self.in_done_cid.clear()
+        self.lbl_done_cid.setText("Chưa có cid nào hoàn thành.")
+        self._refresh_run_stat()
+        self.pbar.setValue(0)
+
+    def _clear_done_cids(self) -> None:
+        self.runlog.clear_done()
+        self.in_done_cid.clear()
+        self.lbl_done_cid.setText("Chưa có cid nào hoàn thành.")
+
+    def _copy_done_cids(self) -> None:
+        from PySide6.QtWidgets import QApplication
+        cids = list(self.runlog.done_cids)
+        if not cids:
+            QMessageBox.information(
+                self, "Chưa có cid nào xong",
+                "Chưa có cid nào hoàn thành để sao chép.")
+            return
+        QApplication.clipboard().setText("\n".join(cids))
+        self._log("cid", f"Đã sao chép {len(cids)} cid hoàn thành.", "ok")
+
+    def _refresh_run_stat(self) -> None:
+        """Cập nhật thanh thống kê + danh sách cid đã xong."""
+        m = self.runlog
+        self.lbl_run_stat.setText(m.stats_text())
+        cids = m.done_cids
+        if cids:
+            self.lbl_done_cid.setText(
+                f"{len(cids)} cid đã xong. Bấm 'Sao chép' để lấy danh sách.")
+            if self.in_done_cid.toPlainText().split("\n") != cids:
+                self.in_done_cid.setPlainText("\n".join(cids))
+        else:
+            self.lbl_done_cid.setText("Chưa có cid nào hoàn thành.")
+            if self.in_done_cid.toPlainText():
+                self.in_done_cid.clear()
+
+    def _open_account_picker(self) -> None:
+        """Mở hộp thoại xem / tick tay danh sách tài khoản."""
+        if not self.accounts:
+            QMessageBox.information(
+                self, "Chưa nạp cookie",
+                "Hãy bấm '📂 Nạp cookie' trước để có danh sách tài khoản.")
+            return
+        dlg = AccountPickerDialog(self.model, self)
+        if dlg.exec():
+            self._refresh_picker()
+            self._refresh_pick_stat()
+            self._log("head", f"Đã áp dụng chọn: "
+                              f"{self.model.selected_count()} tài khoản.", "head")
+
     def _build_toolbar(self) -> QWidget:
         """Thanh công cụ kiểu admin: nhóm lệnh trái, hành động chính phải."""
         w = QFrame()
@@ -355,11 +523,19 @@ class MainWindow(QMainWindow):
 
         self.btn_load = QPushButton("📂 Nạp cookie")
         self.btn_load.setToolTip("Đọc file cookie, 1 dòng = 1 tài khoản")
-        self.btn_all = QPushButton("☑ Tick tất cả")
-        self.btn_none = QPushButton("☐ Bỏ tick")
-        self.btn_good = QPushButton("✔ Tick còn phiên")
-        for b in (self.btn_load, self.btn_all, self.btn_none, self.btn_good):
-            h.addWidget(b)
+        h.addWidget(self.btn_load)
+
+        # Không còn bảng danh sách tài khoản, nên không có ô tick để
+        # bấm. Thay bằng nút xem trước danh sách — vẫn cần để biết đã
+        # nạp được bao nhiêu, có bao nhiêu tài khoản còn phiên đăng nhập.
+        self.btn_list = QPushButton("☰ Danh sách tài khoản")
+        self.btn_list.setObjectName("ghost")
+        self.btn_list.setToolTip(
+            "Xem / tick tay danh sách tài khoản.\n"
+            "Không bắt buộc — mặc định cứ chạy hết, dùng ô 'Số lượng tài "
+            "khoản chạy' ở bên phải để giới hạn.")
+        self.btn_list.clicked.connect(self._open_account_picker)
+        h.addWidget(self.btn_list)
 
         h.addStretch(1)
 
@@ -391,80 +567,6 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     # Tìm kiếm + lọc
     # ------------------------------------------------------------------ #
-    def _build_search(self) -> QWidget:
-        """Thanh tìm kiếm đặt TRÊN bảng — lọc ngay khi gõ, có trễ 250ms."""
-        w = QFrame()
-        w.setProperty("role", "card")
-        h = QHBoxLayout(w)
-        h.setContentsMargins(6, 3, 6, 3)
-        h.setSpacing(6)
-
-        self.in_search = QLineEdit()
-        self.in_search.setFixedHeight(22)
-        self.in_search.setPlaceholderText(
-            "Tìm theo username, email, proxy, trạng thái, kết quả…   "
-            "(nhiều từ = phải khớp tất cả)"
-        )
-        self.in_search.setClearButtonEnabled(True)
-        h.addWidget(self.in_search, 1)
-
-        lbl = QLabel("Lọc:")
-        lbl.setProperty("role", "hint")
-        h.addWidget(lbl)
-
-        self.cb_filter = QComboBox()
-        for key, label in AccountTableModel.FILTER_LABELS.items():
-            self.cb_filter.addItem(label, key)
-        self.cb_filter.setFixedWidth(160)
-        h.addWidget(self.cb_filter)
-
-        self.btn_filter_view = QPushButton("Tick kết quả lọc")
-        self.btn_filter_view.setObjectName("ghost")
-        self.btn_filter_view.setToolTip(
-            "Tick mọi tài khoản đang khớp bộ lọc — nhanh hơn tick từng trang\n"
-            "khi danh sách rất lớn."
-        )
-        h.addWidget(self.btn_filter_view)
-
-        self.btn_search_clear = QPushButton("Xóa lọc")
-        self.btn_search_clear.setObjectName("ghost")
-        h.addWidget(self.btn_search_clear)
-        return w
-
-    def _wire_search(self) -> None:
-        # trễ 250ms: gõ nhanh không làm nghẽn bảng với danh sách lớn
-        self._search_timer = QTimer(self)
-        self._search_timer.setSingleShot(True)
-        self._search_timer.setInterval(250)
-        self._search_timer.timeout.connect(
-            lambda: self.model.set_query(self.in_search.text())
-        )
-        self.in_search.textChanged.connect(lambda _: self._search_timer.start())
-        self.in_search.returnPressed.connect(self._search_timer.stop)
-        self.cb_filter.currentIndexChanged.connect(
-            lambda: self.model.set_filter(self.cb_filter.currentData())
-        )
-        self.btn_search_clear.clicked.connect(self._clear_search)
-        self.btn_filter_view.clicked.connect(self._tick_filtered)
-
-        # phím tắt: Ctrl+F nhảy vào ô tìm, Esc xóa tìm kiếm
-        for seq, fn in (
-            ("Ctrl+F", lambda: (self.tabs.setCurrentWidget(self.tab_main),
-                                self.in_search.setFocus(),
-                                self.in_search.selectAll())),
-            ("Esc", self._clear_search),
-        ):
-            act = QAction(self)
-            act.setShortcut(QKeySequence(seq))
-            act.triggered.connect(fn)
-            self.addAction(act)
-
-    def _clear_search(self) -> None:
-        self._search_timer.stop()
-        self.in_search.clear()
-        self.cb_filter.setCurrentIndex(0)
-        self.model.clear_search()
-
     def _tick_filtered(self) -> None:
         n = self.model.view_count
         self.model.toggle_view(True)
@@ -473,64 +575,22 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ #
     def _build_pager(self) -> QWidget:
-        """Thanh đếm số tài khoản — KHÔNG phân trang nữa.
-
-        Trước đây chia 50 dòng 1 trang rồi phải bấm « Trước / Sau » để
-        cuộn hết danh sách. Với vài nghìn tài khoản thì việc đó chỉ thêm
-        thao tác, nên nay hiện TOÀN BỘ danh sách, cuộn bằng con lăn.
-        Ô đếm ở đây là thứ người dùng nhìn để biết đã quét được bao nhiêu
-        tài khoản từ file cookie.
-        """
+        """Thanh đếm tài khoản đã nạp (bảng tài khoản đã bỏ khỏi màn chính)."""
         w = QFrame()
         w.setProperty("role", "card")
         h = QHBoxLayout(w)
-        h.setContentsMargins(6, 2, 6, 2)
-        h.setSpacing(4)
-
-        # Số tài khoản đã quét — làm nổi bật vì đây là con số người dùng
-        # cần để quyết định có chạy hay không.
+        h.setContentsMargins(8, 3, 8, 3)
+        h.setSpacing(8)
         self.lbl_scanned = QLabel("Chưa quét")
         self.lbl_scanned.setStyleSheet("font-weight:700;color:#7ee787;")
         h.addWidget(self.lbl_scanned)
-        h.addSpacing(12)
-
         self.lbl_range = QLabel("")
         self.lbl_range.setStyleSheet("color:#5f6b7a;")
         h.addWidget(self.lbl_range)
-        h.addSpacing(12)
-
-        # nút bật/tắt dòng gọn — hữu ích hơn nữa khi hiện cả danh sách
-        self.btn_compact = QPushButton("Dòng gọn" if self._compact_rows
-                                       else "Dòng cao")
-        self.btn_compact.setObjectName("ghost")
-        self.btn_compact.setToolTip(
-            f"Dòng gọn: 1 dòng, {self.delegate.row_h()}px — "
-            f"nhìn được nhiều tài khoản cùng lúc.\n"
-            "Dòng cao: 2 dòng (username + email tách dòng), dễ đọc hơn "
-            "nhưng chỉ hiện được ~16 dòng trong khung."
-        )
-        self.btn_compact.clicked.connect(self._toggle_compact)
-        h.addWidget(self.btn_compact)
-
         h.addStretch(1)
         self.lbl_pick = QLabel("")
         h.addWidget(self.lbl_pick)
         return w
-
-    def _toggle_compact(self) -> None:
-        self._compact_rows = not self._compact_rows
-        self.delegate.compact = self._compact_rows
-        self.settings.compact_rows = self._compact_rows
-        self._apply_row_height()
-        self.btn_compact.setText("Dòng gọn" if self._compact_rows else "Dòng cao")
-        self.btn_compact.setToolTip(
-            f"Dòng gọn: 1 dòng, {self.delegate.row_h()}px, "
-            f"50 dòng = {self.delegate.row_h() * 50}px.\n"
-            "Dòng cao: 2 dòng (username + email tách dòng), dễ đọc hơn "
-            "nhưng chỉ ~16 dòng / trang."
-        )
-        self.model._refresh_page()
-        self._refresh_pager()
 
     def _on_per_page_changed(self) -> None:
         """Đã bỏ phân trang — giữ hàm để code cũ gọi được, không làm gì."""
@@ -538,130 +598,35 @@ class MainWindow(QMainWindow):
 
     def _refresh_pager(self) -> None:
         m = self.model
+        sel = m.selected_count()
         if m.total == 0:
             self.lbl_scanned.setText("Chưa quét")
             self.lbl_range.setText("Chưa có tài khoản")
-            self.lbl_pick.setText("đã tick 0")
-            self._refresh_pick_stat()
-            return
-        # Ô đếm lớn: số tài khoản đọc được từ file cookie — thứ người
-        # dùng nhìn để biết đã quét được bao nhiêu.
-        sel = m.selected_count()
-        self.lbl_scanned.setText(f"✔ Đã quét {m.total:,} tài khoản".replace(",", "."))
-
-        # khi đang lọc, nói rõ đang xem bao nhiêu trong tổng số
-        filtering = m.view_count != m.total
-        if filtering:
-            self.lbl_range.setText(
-                f"Đang lọc còn {m.view_count} / {m.total} tài khoản"
-            )
+            self.lbl_pick.setText("")
         else:
-            self.lbl_range.setText("Đang hiện toàn bộ danh sách")
-        self.lbl_pick.setText(f"đã tick {sel}/{m.total}")
-        self.lbl_info.setText(
-            f"{m.total} tài khoản · {sel} được tick · "
-            f"{sum(1 for a in m.accounts() if a.has_session())} còn phiên"
-        )
-        # đồng bộ nhãn lọc đang chọn
-        if self.cb_filter.currentData() != m.filter:
-            self.cb_filter.blockSignals(True)
-            i = self.cb_filter.findData(m.filter)
-            if i >= 0:
-                self.cb_filter.setCurrentIndex(i)
-            self.cb_filter.blockSignals(False)
-
-    def _build_table(self) -> QWidget:
-        box = QGroupBox("Danh sách tài khoản")
-        v = QVBoxLayout(box)
-        v.setSpacing(3)
-        # Lề mỏng: mỗi px ở đây là 1px thêm cho bảng, mà bảng đang thiếu
-        # chỗ để hiện đủ 50 dòng mà không phải cuộn.
-        v.setContentsMargins(6, 4, 6, 4)
-        v.addWidget(self._build_search())
-
-        self.table = QTableView()
-        self.table.setModel(self.model)
-        # Chế độ gọn: 1 dòng / ô, cao 14px, vừa 50 dòng / trang.
-        self._compact_rows = self.settings.compact_rows
-        self.delegate = AccountCellDelegate(self.table, compact=self._compact_rows)
-        self.table.setItemDelegate(self.delegate)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setVerticalScrollMode(
-            QAbstractItemView.ScrollMode.ScrollPerPixel
-        )
-        self.table.verticalHeader().setVisible(False)
-        self._apply_row_height()
-        self.table.horizontalHeader().setHighlightSections(False)
-        # Bấm tiêu đề cột để sắp xếp — TỰ điều khiển, không dùng
-        # setSortingEnabled(True) của Qt: bật cái đó thì Qt tự sắp lại mỗi
-        # lần dữ liệu đổi, làm hàng nhảy loạn đúng lúc người dùng đang theo dõi.
-        self.table.setSortingEnabled(False)
-        self.table.horizontalHeader().setSectionsClickable(True)
-        self.table.horizontalHeader().setSortIndicatorShown(True)
-        self.table.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
-        self.table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Interactive
-        )
-        self.table.horizontalHeader().setStretchLastSection(True)
-        # A và B đặt bề rộng cố định; CỘT CUỐI tự nhận hết phần dư, nên KHÔNG
-        # gọi setColumnWidth cho nó — lệnh đó bị `stretchLastSection` bỏ qua và
-        # gây hiểu nhầm là đã đặt được. Cột C chứa nhãn sức khoẻ kèm chi tiết
-        # nên cần chỗ rộng nhất, đặt C cuối là hợp lý.
-        self.table.setColumnWidth(0, 470)
-        self.table.setColumnWidth(1, 480)
-        # Chuột phải -> menu kiểm tra trạng thái tài khoản
-        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self._show_table_menu)
-        # Delegate tự vẽ nên không có sẵn hình chữ nhật của từng ô; phải báo
-        # cho nó biết toạ độ bảng để tính vị trí ô tick khi bấm chuột.
-        self._sync_delegate_geometry()
-        self.table.verticalScrollBar().valueChanged.connect(
-            lambda *_: self._sync_delegate_geometry()
-        )
-        self.table.horizontalScrollBar().valueChanged.connect(
-            lambda *_: self._sync_delegate_geometry()
-        )
-        # Delegate không bao giờ nhận MouseButtonRelease (QTableView giữ
-        # lại khi delegate trả True cho press) nên không tự kết thúc
-        # quét được. Gắn event filter lên viewport: nơi nhận release
-        # thật. Filter chỉ dọn trạng thái rồi trả False, không chặn
-        # hành vi nào của bảng.
-        self.delegate.attach_sweep_filter(self.table.viewport())
-        v.addWidget(self.table, 1)
-        v.addWidget(self._build_pager())
-        return box
-
-    def _sync_delegate_geometry(self) -> None:
-        """Đẩy toạ độ thật của bảng xuống delegate.
-
-        Cột A có ô tick 11–13px; nếu delegate tự tính toạ độ theo giả định
-        (viewport đặt ở 0,0) thì bấm chuột sẽ trượt khỏi ô khi bảng đã
-        cuộn ngang hoặc co lại — lúc đó không tick được dòng nào.
-        """
-        if not hasattr(self, "delegate") or not hasattr(self, "table"):
-            return
-        h = self.table.horizontalHeader()
-        self.delegate.sync_geometry(
-            self.table.viewport().rect().topLeft(),
-            self.table.viewport().width(),
-            lambda c: h.sectionViewportPosition(c),
-        )
+            self.lbl_scanned.setText(
+                f"✔ Đã quét {m.total:,} tài khoản".replace(",", "."))
+            self.lbl_range.setText("")
+            self.lbl_pick.setText(f"đã chọn {sel}/{m.total}")
+        self._refresh_pick_stat()
+        self._refresh_summary()
 
     def _apply_row_height(self) -> None:
-        """Đặt chiều cao dòng thật sự.
+        """Đặt chiều cao dòng cho bảng log.
 
-        `minimumSectionSize` mặc định là 24px và nó chặn MỌI giá trị nhỏ
-        hơn — kể cả `setDefaultSectionSize(14)`. Muốn dòng 14px thì phải hạ
-        minimum xuống trước, nếu không bảng cứ vẽ 24px và 50 dòng không bao
-        giờ vừa màn hình. Đây là bẫy rất dễ sót vì không có lỗi nào hiện ra.
+        `minimumSectionSize` mặc định 24px và nó chặn MỌI giá trị nhỏ
+        hơn — kể cả `setDefaultSectionSize(14)`. Muốn dòng 14px phải hạ
+        minimum xuống trước, nếu không bảng cứ vẽ 24px. Đây là bẫy rất
+        dễ sót vì không có lỗi nào hiện ra.
         """
-        vh = self.table.verticalHeader()
-        h = self.delegate.row_h()
+        if not hasattr(self, "tbl_run"):
+            return
+        vh = self.tbl_run.verticalHeader()
+        h = 18
         vh.setMinimumSectionSize(h)
         vh.setDefaultSectionSize(h)
-        # Các section đã tạo có thể đang giữ kích thước cũ.
-        vh.resizeSection(0, h)
+        if vh.count():
+            vh.resizeSection(0, h)
 
     @staticmethod
     def _node_installed() -> bool:
@@ -904,19 +869,12 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     # Kiểm tra trạng thái tài khoản (chuột phải)
     # ------------------------------------------------------------------ #
-    def _acc_under(self, pos: QPoint):
-        """Tài khoản dưới con trỏ chuột, hoặc dòng đang chọn."""
-        idx = self.table.indexAt(pos)
-        if idx.isValid():
-            acc = self.model.row_to_account(idx.row())
-            if acc is not None:
-                return acc
-        return self.current_account()
-
     def _show_table_menu(self, pos: QPoint) -> None:
-        acc = self._acc_under(pos)
+        """Menu chuột phải TRÊN BẢNG LOG — nơi chạy và xem kết quả."""
         m = QMenu(self)
         running = self.checker.running
+        idle = (not running) and (not self.controller.busy)
+        n_tick = self.model.selected_count()
 
         def act(text, slot, enabled=True, tip=""):
             a = QAction(text, self)
@@ -927,56 +885,47 @@ class MainWindow(QMainWindow):
             m.addAction(a)
             return a
 
-        if acc is not None:
-            n_sel = len(self.table.selectionModel().selectedRows())
-            act(f"Kiểm tra trạng thái: {acc.username}",
-                lambda: self._start_health([acc]),
-                not running and not self.controller.busy)
-            m.addSeparator()
-            act(f"Kiểm tra {n_sel} dòng đang chọn" if n_sel > 1
-                else "Kiểm tra dòng đang chọn",
-                self._check_selected,
-                not running and not self.controller.busy)
-            act("Kiểm tra cả trang này", self._check_page,
-                not running and not self.controller.busy)
-            act("Kiểm tra tất cả đã tick", self._check_ticked,
-                not running and not self.controller.busy)
-            act("Kiểm tra TOÀN BỘ danh sách", self._check_all,
-                not running and not self.controller.busy)
-            m.addSeparator()
-            # Kiểm tra cục bộ: nhanh, không tốn request, không cần sidecar.
-            # Phù hợp dọn file hàng nghìn tài khoản.
-            act("Dọn nhanh (chỉ đọc cookie, không gọi mạng)",
-                lambda: self._start_health(list(self.accounts), local_only=True),
-                not running and not self.controller.busy)
-            m.addSeparator()
-            act("Bỏ tick những tài khoản đã die", self._untick_dead,
-                not self.controller.busy)
-            act("Xoá kết quả kiểm tra của trang này", self._clear_health_page,
-                not running)
-            m.addSeparator()
-            act("Sao chép username", lambda: self._copy_acc(acc))
-        else:
-            a = QAction("Chưa có tài khoản nào", self)
-            a.setEnabled(False)
-            m.addAction(a)
-        m.exec(self.table.viewport().mapToGlobal(pos))
+        # --- CHẠY: lối vào không phụ thuộc quét chuột có đẹp hay không ---
+        head = QAction(f"▶  Chạy {n_tick} tài khoản đã chọn", self)
+        head.setEnabled(bool(n_tick) and idle)
+        head.setToolTip("Chạy ngay những tài khoản đang được chọn.\n"
+                        "Tôn trọng ô 'Số lượng tài khoản chạy' ở bên phải.")
+        head.triggered.connect(lambda: self.start_run())
+        m.addAction(head)
 
-    def _copy_acc(self, acc) -> None:
-        from PySide6.QtWidgets import QApplication
-        QApplication.clipboard().setText(acc.username)
+        if n_tick:
+            sub = QMenu(f"Chạy với {n_tick} tài khoản", self)
+            m.addMenu(sub)
+            sub.addAction("Chạy 1 tài khoản (thử nhanh)").triggered.connect(
+                lambda: self.start_run(dry_run=True))
+            sub.addSeparator()
+            a = sub.addAction("Kiểm tra phiên (không thả tim)")
+            a.setEnabled(idle)
+            a.triggered.connect(lambda: self.start_run(mode=MODE_CHECK))
+            sub.addSeparator()
+            a = sub.addAction("Kiểm tra trạng thái tài khoản (cột Status)")
+            a.setEnabled(idle)
+            a.triggered.connect(self._check_ticked)
+        m.addSeparator()
 
-    # ---- phạm vi kiểm tra ----
-    def _check_selected(self) -> None:
-        rows = self.table.selectionModel().selectedRows()
-        if not rows:
-            self._start_health([self.current_account()])
-            return
-        accs = [self.model.row_to_account(r.row()) for r in rows]
-        self._start_health([a for a in accs if a is not None])
-
-    def _check_page(self) -> None:
-        self._start_health(self.model.page_rows())
+        # --- quản lý danh sách ---
+        a = act("☰ Mở danh sách tài khoản để tick tay",
+                self._open_account_picker, not self.controller.busy)
+        act("☑ Chọn tất cả tài khoản",
+            lambda: self.model.toggle_all(True), True)
+        act("☐ Bỏ chọn", self.model.select_none, True)
+        act("✔ Chỉ chọn còn phiên",
+            self.model.select_all_with_session, True)
+        m.addSeparator()
+        act("Bỏ tick những tài khoản đã die", self._untick_dead,
+            not self.controller.busy)
+        m.addSeparator()
+        a = act("⧉ Sao chép các cid đã hoàn thành", self._copy_done_cids,
+                bool(self.runlog.done_cids))
+        if a and not a.isEnabled():
+            a.setToolTip("Chưa có cid nào hoàn thành.")
+        act("✕ Xoá bảng log", self._clear_runlog, True)
+        m.exec(self.tbl_run.viewport().mapToGlobal(pos))
 
     def _check_ticked(self) -> None:
         accs = self.model.selected_accounts()
@@ -1003,12 +952,6 @@ class MainWindow(QMainWindow):
         self.model._refresh_page()
         self._refresh_pager()
         self._log("status", f"Bỏ tick {len(dead)} tài khoản đã die.", "warn")
-
-    def _clear_health_page(self) -> None:
-        for a in self.model.page_rows():
-            a.health, a.health_note, a.health_at = HC_UNKNOWN, "", 0.0
-        self.model._refresh_page()
-        self._refresh_pager()
 
     def _start_health(self, accounts: list, local_only: bool = False) -> None:
         accounts = [a for a in accounts if a is not None]
@@ -1350,9 +1293,6 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     def _connect(self) -> None:
         self.btn_load.clicked.connect(self.on_load_file)
-        self.btn_all.clicked.connect(lambda: self.model.toggle_all(True))
-        self.btn_none.clicked.connect(self.model.select_none)
-        self.btn_good.clicked.connect(self.model.select_all_with_session)
         self.btn_check.clicked.connect(lambda: self.start_run(mode=MODE_CHECK))
         self.btn_run.clicked.connect(self.start_run)
         self.btn_stop.clicked.connect(self.on_stop)
@@ -1365,9 +1305,7 @@ class MainWindow(QMainWindow):
         self.tab_settings.proxies_ready.connect(self._on_proxies_ready)
 
         # bấm vào dòng -> panel chi tiết bên dưới cập nhật theo
-        self.table.selectionModel().selectionChanged.connect(self._on_selection)
         self.cb_mode.currentIndexChanged.connect(self._refresh_detail_task)
-        self._wire_search()
 
         # Ô "số lượng tài khoản chạy" — dòng báo số thực tế phải cập nhật
         # theo mọi thay đổi: tick/bỏ tick, đổi số, đổi radio.
@@ -1479,14 +1417,9 @@ class MainWindow(QMainWindow):
         self.detail.set_account(acc)
 
     def current_account(self):
-        """Tài khoản của dòng đang chọn; nếu chưa chọn thì dòng đầu tiên."""
-        rows = self.table.selectionModel().selectedRows()
-        if rows:
-            acc = self.model.row_to_account(rows[0].row())
-            if acc is not None:
-                return acc
-        page = self.model.page_rows()
-        return page[0] if page else None
+        """Tài khoản đang chọn. Bảng tài khoản đã bỏ khỏi màn chính nên
+        không còn dòng được chọn — trả None, panel Chi tiết tự xử lý."""
+        return None
 
     def _refresh_detail_task(self, *_):
         """Cập nhật thẻ 'tác vụ đang chọn' khi đổi chế độ / nhập cid."""
@@ -1856,6 +1789,15 @@ class MainWindow(QMainWindow):
         self.controller._rotate = s.rotate_on_block
         self._save_settings_quiet()
 
+    def _selected_accounts(self) -> list:
+        """Các tài khoản của những dòng đang được chọn trên bảng."""
+        out = []
+        for i in self.table.selectionModel().selectedRows():
+            a = self.model.row_to_account(i.row())
+            if a is not None:
+                out.append(a)
+        return out
+
     def _save_settings_quiet(self) -> None:
         """Lưu cấu hình, không spam nhật ký.
 
@@ -1929,7 +1871,14 @@ class MainWindow(QMainWindow):
                 f"mở lại app vẫn giữ."
             )
 
-    def start_run(self, mode: str | None = None, dry_run: bool = False) -> None:
+    def start_run(self, mode: str | None = None, dry_run: bool = False,
+                  accounts: list | None = None) -> None:
+        """Bắt đầu chạy.
+
+        `accounts` cho phép chạy một danh sách cụ thể (dùng khi chuột
+        phải → "Chạy riêng tài khoản này"), thay vì bắt buộc phải tick.
+        Không truyền thì lấy những tài khoản đã tick như cũ.
+        """
         if self.controller.busy:
             return
         if mode:
@@ -1954,7 +1903,10 @@ class MainWindow(QMainWindow):
                              f"{', '.join(bad[:5])}", "warn")
 
         # Lấy theo thứ tự đã tick, KHÔNG giới hạn theo bộ lọc/trang đang xem.
-        accounts = self.model.selected_accounts()
+        if accounts is None:
+            accounts = self.model.selected_accounts()
+        else:
+            accounts = [a for a in accounts if a is not None]
         if not accounts:
             QMessageBox.information(self, "Chưa chọn", "Hãy tick ít nhất 1 tài khoản.")
             return
@@ -2065,6 +2017,8 @@ class MainWindow(QMainWindow):
         self.model.reset_status()
         self._progress.clear()
         self.pbar.setValue(0)
+        # mở sẵn dòng log cho từng tài khoản, gắn cid này vào
+        self._log_run_start(accounts, cid)
         self._set_running(True)
         self._refresh_cid_label(running=self._cid_pos + 1)
         self._refresh_detail_task()
@@ -2103,8 +2057,7 @@ class MainWindow(QMainWindow):
 
     def _set_running(self, running: bool) -> None:
         for b in (self.btn_run, self.btn_check, self.btn_load,
-                  self.btn_all, self.btn_none, self.btn_dry,
-                  self.btn_good):
+                  self.btn_dry, self.btn_list):
             b.setEnabled(not running)
         self.btn_stop.setEnabled(running)
 
@@ -2112,6 +2065,20 @@ class MainWindow(QMainWindow):
     # Slots nhận signal từ worker — luôn chạy trên GUI thread
     # ------------------------------------------------------------------ #
     @Slot(int)
+    def _log_run_start(self, accounts: list, cid: str) -> None:
+        """Mở sẵn một dòng log cho mỗi tài khoản sắp chạy.
+
+        Làm TRƯỚC khi chạy để bảng log hiện đủ danh sách ngay, người
+        dùng thấy "đang chạy cái gì" chứ không phải chờ tới khi có kết
+        quả mới thấy dòng đầu tiên.
+        """
+        self.runlog.reset()
+        self.in_done_cid.clear()
+        for a in accounts:
+            self.runlog.add(a.id, cid=cid,
+                             name=getattr(a, "username", "") or a.id)
+        self._refresh_run_stat()
+
     def _on_started(self, count: int) -> None:
         self.lbl_stat.setText(f"0/{count}")
         self.pbar.setValue(0)
@@ -2171,6 +2138,25 @@ class MainWindow(QMainWindow):
         threading.Thread(target=work, daemon=True).start()
 
     @Slot(str, str, str)
+    def _log_row(self, acc_id: str, *, note: str = "", status: str = "",
+                 cid: str = "", ok: bool | None = None) -> None:
+        """Ghi 1 dòng vào bảng log chạy (tạo dòng nếu chưa có).
+
+        `acc_id` là id tài khoản — cùng khoá với signal của worker, nên
+        luôn khớp đúng dòng. Dòng thường đã được tạo lúc bắt đầu chạy;
+        hàm này tự tạo nếu thiếu, để không mất log khi tài khoản phát
+        tín hiệu trước lúc kịp thêm dòng.
+        """
+        if not any(r.acc == acc_id for r in self.runlog._rows):
+            self.runlog.add(acc_id, cid=cid, name=self._acc_label(acc_id))
+        self.runlog.set_status(acc_id, status, note=note, ok=ok)
+        self._refresh_run_stat()
+
+    def _acc_label(self, acc_id: str) -> str:
+        """Tên hiển thị của tài khoản: username nếu có, không thì id."""
+        a = self.model.by_id(acc_id)
+        return getattr(a, "username", "") or acc_id
+
     def _on_status(self, acc_id: str, status: str, note: str) -> None:
         self.model.update_row(acc_id, status=status, note=note)
         # thẻ chi tiết đang hiển thị tài khoản này -> vẽ lại
@@ -2190,11 +2176,17 @@ class MainWindow(QMainWindow):
             if line:
                 # Ghi luôn vào cột B để nhìn bảng là biết đã thả tim cid nào
                 self.model.update_row(acc_id, note=line)
+            self._log_row(acc_id, note=line or note or status,
+                          status=LG_OK, ok=True)
         elif status == ST_FAIL:
             self._log(acc_id, f"✖ {note}", "err")
             self._set_detail_tab_text()
+            self._log_row(acc_id, note=note, status=LG_FAIL, ok=False)
         elif status == ST_SKIP:
             self._log(acc_id, f"– {note or status}", "warn")
+            self._log_row(acc_id, note=note or status, status="Bỏ qua")
+        else:   # ST_DONE: đăng nhập hợp lệ, chưa bình luận (chế độ check)
+            self._log_row(acc_id, note=note or status, status=LG_DONE)
 
     @Slot(str, int)
     def _on_progress(self, acc_id: str, pct: int) -> None:
@@ -2205,14 +2197,22 @@ class MainWindow(QMainWindow):
     @Slot(str, str)
     def _on_log(self, acc_id: str, message: str) -> None:
         self._log(acc_id, message, "info")
+        # ghi vào CỘT C của bảng log — đây là chỗ người dùng nhìn để
+        # biết tài khoản đó đang làm gì (đăng nhập / tìm comment / thả tim)
+        self.runlog.update(acc_id, note=message)
+        self._refresh_run_stat()
 
     @Slot()
     def _on_finished(self) -> None:
-        rows = self.model.accounts()
-        ok = sum(1 for a in rows if a.status == ST_OK)
-        done = sum(1 for a in rows if a.status == ST_DONE)
-        err = sum(1 for a in rows if a.status == ST_FAIL)
-        skip = sum(1 for a in rows if a.status == ST_SKIP)
+        # Thống kê lấy từ BẢNG LOG, không phải danh sách tài khoản:
+        # bảng log mới là thứ người dùng nhìn, số phải khớp với nó.
+        m = self.runlog
+        n_rows = m.row_count()
+        ok = sum(1 for r in m._rows if r.status == LG_OK)
+        done = sum(1 for r in m._rows if r.status == LG_DONE)
+        err = sum(1 for r in m._rows if r.status == LG_FAIL)
+        skip = n_rows - ok - done - err
+        self._refresh_run_stat()
         self.pbar.setValue(100)
         self.meter.stop()
         self.lbl_stat.setText(f"✔ {ok} · ● {done} · ✖ {err} · – {skip}")
@@ -2294,7 +2294,6 @@ class MainWindow(QMainWindow):
         )
         self.settings.cid_list = self.in_cid.toPlainText()
         self.settings.per_page = 0          # 0 = không phân trang
-        self.settings.compact_rows = self._compact_rows
         try:
             p = self.settings.save()
             self._log("cài đặt", f"Đã lưu cấu hình: {p}", "ok")
