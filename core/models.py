@@ -6,6 +6,7 @@ không đi qua chỉ số dòng (row index) — vì row index thay đổi khi so
 
 from __future__ import annotations
 
+import datetime
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
@@ -17,6 +18,8 @@ CHECK_ROLE = Qt.ItemDataRole.UserRole + 2
 # Số thứ tự toàn cục trong danh sách (không phải số dòng trên trang hiện tại)
 NO_ROLE = Qt.ItemDataRole.UserRole + 3
 HAS_SESSION_ROLE = Qt.ItemDataRole.UserRole + 4
+# Mức sức khoẻ tài khoản (HC_*), để delegate vẽ cột Status
+HEALTH_ROLE = Qt.ItemDataRole.UserRole + 5
 
 # --- Trạng thái (dùng chung cho model và backend) ---
 ST_IDLE = "Chờ"
@@ -25,6 +28,25 @@ ST_OK = "Thành công"
 ST_FAIL = "Lỗi"
 ST_SKIP = "Bỏ qua"
 ST_DONE = "Hoàn tất"  # đăng nhập OK nhưng chưa bình luận (chỉ chế độ check)
+
+# --- Sức khoẻ tài khoản (cột Status) ---
+# Tách khỏi ST_* vì ý nghĩa khác: ST_* là kết quả LẦN CHẠY vừa rồi,
+# HC_* là tình trạng tài khoản có dùng được hay không.
+HC_UNKNOWN = "unknown"    # chưa kiểm tra
+HC_CHECKING = "checking"  # đang kiểm tra
+HC_ALIVE = "alive"        # cookie còn dùng được
+HC_DEAD = "dead"          # chắc chắn hỏng
+HC_EXPIRED = "expired"    # hết hạn theo sid_guard
+HC_RISKY = "risky"        # không kết luận được (bị chặn bot / IP)
+
+HEALTH_LABELS = {
+    HC_UNKNOWN: "Chưa kiểm",
+    HC_CHECKING: "Đang kiểm…",
+    HC_ALIVE: "● Sống",
+    HC_DEAD: "✖ Die",
+    HC_EXPIRED: "⌛ Hết hạn",
+    HC_RISKY: "? Không rõ",
+}
 
 
 _STATUS_COLORS = {
@@ -61,6 +83,11 @@ class Account:
     found: bool = False
     login_ok: bool = False
 
+    # Sức khoẻ tài khoản (cột Status) — kết quả của lần kiểm tra gần nhất
+    health: str = HC_UNKNOWN
+    health_note: str = ""
+    health_at: float = 0.0        # mốc thời gian (time.time())
+
     # Proxy riêng (gán từ tab Cài đặt)
     proxy: str = ""              # URL curl_cffi dùng thật (có mật khẩu)
     proxy_label: str = ""        # dạng hiển thị, đã che mật khẩu
@@ -71,15 +98,28 @@ class Account:
 
     def expiry_hint(self) -> str:
         """Ngày hết hạn từ `sid_guard` = sid|ts|ttl|... (URL-encode bằng %7C)."""
+        end = self.expiry_ts()
+        return datetime.datetime.fromtimestamp(end).strftime("%Y-%m-%d") if end else ""
+
+    def expiry_ts(self) -> int:
+        """Mốc hết hạn (unix timestamp) của phiên, 0 nếu đọc không được."""
         raw = self.cookie.get("sid_guard", "")
         parts = raw.replace("|", "%7C").split("%7C")
         if len(parts) >= 3 and parts[1].isdigit():
-            import datetime
-
             ttl = int(parts[2]) if parts[2].isdigit() else 0
-            end = int(parts[1]) + ttl
-            return datetime.datetime.fromtimestamp(end).strftime("%Y-%m-%d")
-        return ""
+            return int(parts[1]) + ttl
+        return 0
+
+    def is_expired(self) -> bool:
+        """Phiên đã hết hạn theo đồng hồ của cookie chưa.
+
+        Đây là kiểm tra SỐ BẰNG CHỨNG CỤC BỘ, không cần gọi mạng — nhưng
+        TikTok có thể thu hồi phiên sớm hơn mốc ghi trong cookie (đổi mật
+        khẩu, đăng xuất ở nơi khác, ban hành vì lạm dụng). Vì vậy đây chỉ là
+        một trong các tín hiệu, không phải kết luận cuối.
+        """
+        end = self.expiry_ts()
+        return bool(end) and end < datetime.datetime.now().timestamp()
 
 
 @dataclass(slots=True)
@@ -95,10 +135,10 @@ class TaskResult:
 
 
 class AccountTableModel(QAbstractTableModel):
-    """Bảng 2 cột đúng yêu cầu: A = thông tin tài khoản, B = trạng thái."""
+    """Bảng 3 cột: A = tài khoản, B = trạng thái lần chạy, C = sức khoẻ."""
 
-    HEADERS = ["A · Tài khoản", "B · Trạng thái"]
-    COL_ACCOUNT, COL_STATUS = 0, 1
+    HEADERS = ["A · Tài khoản", "B · Kết quả", "C · Status"]
+    COL_ACCOUNT, COL_STATUS, COL_HEALTH = 0, 1, 2
 
     # --- bộ lọc nhanh (combo trên thanh tìm kiếm) ---
     F_ALL = "all"
@@ -109,6 +149,8 @@ class AccountTableModel(QAbstractTableModel):
     F_HAS_PROXY = "has_proxy"
     F_OK = "ok"
     F_FAIL = "fail"
+    F_ALIVE = "alive"
+    F_DEAD = "dead"
 
     FILTER_LABELS = {
         F_ALL: "Tất cả",
@@ -119,6 +161,8 @@ class AccountTableModel(QAbstractTableModel):
         F_HAS_PROXY: "Đã gán proxy",
         F_OK: "Thành công",
         F_FAIL: "Bị lỗi",
+        F_ALIVE: "Status: còn sống",
+        F_DEAD: "Status: đã die",
     }
 
     STATUS_LABELS = {
@@ -220,6 +264,10 @@ class AccountTableModel(QAbstractTableModel):
             return False
         if f == self.F_FAIL and a.status != ST_FAIL:
             return False
+        if f == self.F_ALIVE and a.health != HC_ALIVE:
+            return False
+        if f == self.F_DEAD and a.health not in (HC_DEAD, HC_EXPIRED):
+            return False
         if self._query:
             hay = self._hay_cache.get(a.id)
             if hay is None:
@@ -238,10 +286,16 @@ class AccountTableModel(QAbstractTableModel):
             # sắp xếp theo số thứ tự gốc -> chính là thứ tự trong _rows
             order = {id(a): i for i, a in enumerate(self._rows)}
             view.sort(key=lambda a: order[id(a)], reverse=desc)
+        elif col == 1:
+            view.sort(key=lambda a: (a.status, a.username.lower()),
+                      reverse=desc)
         else:
-            key = (lambda a: a.username.lower()) if col == 1 \
-                else (lambda a: (a.status, a.username.lower()))
-            view.sort(key=key, reverse=desc)
+            # cột 3 (sức khoẻ): nhóm theo mức độ "dùng được" để các tài
+            # khoản chết dồn lên đầu, thay vì sắp theo chữ cái.
+            rank = {HC_DEAD: 0, HC_EXPIRED: 1, HC_RISKY: 2, HC_CHECKING: 3,
+                    HC_ALIVE: 4, HC_UNKNOWN: 5}
+            view.sort(key=lambda a: (rank.get(a.health, 9),
+                                     a.username.lower()), reverse=desc)
         self._view = view
 
     def clear_search(self) -> None:
@@ -438,6 +492,18 @@ class AccountTableModel(QAbstractTableModel):
     def selected_count(self) -> int:
         return sum(1 for a in self._rows if a.selected)
 
+    def health_counts(self) -> dict[str, int]:
+        """Đếm số tài khoản theo mức sức khoẻ, để hiện ở thanh dưới."""
+        out: dict[str, int] = {}
+        for a in self._rows:
+            out[a.health] = out.get(a.health, 0) + 1
+        return out
+
+    def reset_health(self) -> None:
+        for a in self._rows:
+            a.health, a.health_note, a.health_at = HC_UNKNOWN, "", 0.0
+        self._refresh_page()
+
     # ---- QAbstractTableModel API ----
     def rowCount(self, parent=QModelIndex()) -> int:  # noqa: N802
         if parent.isValid():
@@ -465,10 +531,14 @@ class AccountTableModel(QAbstractTableModel):
             return self.page_first + index.row()
         if role == HAS_SESSION_ROLE:
             return acc.has_session()
+        if role == HEALTH_ROLE:
+            return acc.health
 
         if role == Qt.ItemDataRole.DisplayRole:
             if col == self.COL_ACCOUNT:
                 return self.account_line(acc)
+            if col == self.COL_HEALTH:
+                return HEALTH_LABELS.get(acc.health, "?")
             return self.STATUS_LABELS.get(acc.status, acc.status)
 
         if role == Qt.ItemDataRole.CheckStateRole and col == self.COL_ACCOUNT:
@@ -481,6 +551,19 @@ class AccountTableModel(QAbstractTableModel):
             return int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         if role == Qt.ItemDataRole.ToolTipRole:
+            if col == self.COL_HEALTH:
+                lines = [f"Sức khoẻ: {HEALTH_LABELS.get(acc.health, '?')}"]
+                if acc.health_note:
+                    lines.append(f"Chi tiết : {acc.health_note}")
+                if acc.health_at:
+                    lines.append(
+                        "Kiểm tra  : "
+                        + datetime.datetime.fromtimestamp(
+                            acc.health_at).strftime("%H:%M:%S")
+                    )
+                lines.append("")
+                lines.append("Chuột phải vào dòng này → 'Kiểm tra trạng thái'")
+                return "\n".join(lines)
             if col == self.COL_STATUS:
                 # chỉ trả về ghi chú; để rỗng thì dòng phụ không vẽ gì
                 # (tránh lặp lại y hệt dòng trạng thái ở trên)
@@ -531,9 +614,12 @@ class AccountTableModel(QAbstractTableModel):
         if orientation == Qt.Orientation.Horizontal:
             if role == Qt.ItemDataRole.DisplayRole:
                 return self.HEADERS[section]
-            # mũi tên chỉ cột đang sắp xếp
             if role == Qt.ItemDataRole.ToolTipRole:
-                return ("Bấm để sắp xếp theo cột này" if section in (0, 1) else None)
+                if section == self.COL_HEALTH:
+                    return ("Sức khoẻ tài khoản.\n"
+                            "Chuột phải vào một dòng → 'Kiểm tra trạng thái'.\n"
+                            "Bấm tiêu đề để gom tài khoản chết lên đầu.")
+                return "Bấm để sắp xếp theo cột này"
         return None
 
     def sort(self, column: int, order=Qt.SortOrder.AscendingOrder) -> None:  # noqa: A003

@@ -7,7 +7,7 @@ import html
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Slot
+from PySide6.QtCore import QPoint, Qt, QTimer, Slot
 from PySide6.QtGui import QAction, QFont, QKeySequence, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -48,7 +49,15 @@ from core.config import (
     RunConfig,
 )
 from core.gui_bridge import init_bridge
+from core.health import HealthChecker
 from core.models import (
+    HC_ALIVE,
+    HC_CHECKING,
+    HC_DEAD,
+    HC_EXPIRED,
+    HC_RISKY,
+    HC_UNKNOWN,
+    HEALTH_LABELS,
     ID_ROLE,
     ST_DONE,
     ST_FAIL,
@@ -114,6 +123,10 @@ class MainWindow(QMainWindow):
             pool=self.proxy_pool,
             rotate_on_block=self.settings.rotate_on_block,
         )
+        # Bộ kiểm tra sức khoẻ tài khoản (chuột phải → Kiểm tra trạng thái)
+        self.checker = HealthChecker(self.settings, parent=self)
+        self.checker._on_applied = self._apply_health
+        self.checker.log.connect(self._on_log)
         self._progress: dict[str, int] = {}
         self._last_run = ""
         self._signer_ready = False
@@ -134,6 +147,10 @@ class MainWindow(QMainWindow):
         self.controller.log.connect(self._on_log)
         # đồng hồ tốc độ: đếm theo task ĐÃ TRẢ VỀ, và theo kết quả
         self.controller.task_done.connect(self._on_task_done)
+
+        # kiểm tra sức khoẻ tài khoản
+        self.checker.checked.connect(self._on_health_progress)
+        self.checker.all_done.connect(self._on_health_done)
 
         # nhịp 1 giây: cập nhật acc/s, ETA, biểu đồ; 5 giây hỏi sidecar
         self._meter_timer = QTimer(self)
@@ -563,12 +580,15 @@ class MainWindow(QMainWindow):
             QHeaderView.ResizeMode.Interactive
         )
         self.table.horizontalHeader().setStretchLastSection(True)
-        # cột A giãn theo bề rộng cửa sổ, cột B phần dư
-        self.table.setColumnWidth(0, 520)
-        self.table.setColumnWidth(1, 520)
-        self.table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.Stretch
-        )
+        # A và B đặt bề rộng cố định; CỘT CUỐI tự nhận hết phần dư, nên KHÔNG
+        # gọi setColumnWidth cho nó — lệnh đó bị `stretchLastSection` bỏ qua và
+        # gây hiểu nhầm là đã đặt được. Cột C chứa nhãn sức khoẻ kèm chi tiết
+        # nên cần chỗ rộng nhất, đặt C cuối là hợp lý.
+        self.table.setColumnWidth(0, 470)
+        self.table.setColumnWidth(1, 480)
+        # Chuột phải -> menu kiểm tra trạng thái tài khoản
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_table_menu)
         v.addWidget(self.table, 1)
         v.addWidget(self._build_pager())
         return box
@@ -587,6 +607,209 @@ class MainWindow(QMainWindow):
         vh.setDefaultSectionSize(h)
         # Các section đã tạo có thể đang giữ kích thước cũ.
         vh.resizeSection(0, h)
+
+    # ------------------------------------------------------------------ #
+    # Kiểm tra trạng thái tài khoản (chuột phải)
+    # ------------------------------------------------------------------ #
+    def _acc_under(self, pos: QPoint):
+        """Tài khoản dưới con trỏ chuột, hoặc dòng đang chọn."""
+        idx = self.table.indexAt(pos)
+        if idx.isValid():
+            acc = self.model.row_to_account(idx.row())
+            if acc is not None:
+                return acc
+        return self.current_account()
+
+    def _show_table_menu(self, pos: QPoint) -> None:
+        acc = self._acc_under(pos)
+        m = QMenu(self)
+        running = self.checker.running
+
+        def act(text, slot, enabled=True, tip=""):
+            a = QAction(text, self)
+            a.setEnabled(enabled)
+            if tip:
+                a.setToolTip(tip)
+            a.triggered.connect(slot)
+            m.addAction(a)
+            return a
+
+        if acc is not None:
+            n_sel = len(self.table.selectionModel().selectedRows())
+            act(f"Kiểm tra trạng thái: {acc.username}",
+                lambda: self._start_health([acc]),
+                not running and not self.controller.busy)
+            m.addSeparator()
+            act(f"Kiểm tra {n_sel} dòng đang chọn" if n_sel > 1
+                else "Kiểm tra dòng đang chọn",
+                self._check_selected,
+                not running and not self.controller.busy)
+            act("Kiểm tra cả trang này", self._check_page,
+                not running and not self.controller.busy)
+            act("Kiểm tra tất cả đã tick", self._check_ticked,
+                not running and not self.controller.busy)
+            act("Kiểm tra TOÀN BỘ danh sách", self._check_all,
+                not running and not self.controller.busy)
+            m.addSeparator()
+            # Kiểm tra cục bộ: nhanh, không tốn request, không cần sidecar.
+            # Phù hợp dọn file hàng nghìn tài khoản.
+            act("Dọn nhanh (chỉ đọc cookie, không gọi mạng)",
+                lambda: self._start_health(list(self.accounts), local_only=True),
+                not running and not self.controller.busy)
+            m.addSeparator()
+            act("Bỏ tick những tài khoản đã die", self._untick_dead,
+                not self.controller.busy)
+            act("Xoá kết quả kiểm tra của trang này", self._clear_health_page,
+                not running)
+            m.addSeparator()
+            act("Sao chép username", lambda: self._copy_acc(acc))
+        else:
+            a = QAction("Chưa có tài khoản nào", self)
+            a.setEnabled(False)
+            m.addAction(a)
+        m.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _copy_acc(self, acc) -> None:
+        from PySide6.QtWidgets import QApplication
+        QApplication.clipboard().setText(acc.username)
+
+    # ---- phạm vi kiểm tra ----
+    def _check_selected(self) -> None:
+        rows = self.table.selectionModel().selectedRows()
+        if not rows:
+            self._start_health([self.current_account()])
+            return
+        accs = [self.model.row_to_account(r.row()) for r in rows]
+        self._start_health([a for a in accs if a is not None])
+
+    def _check_page(self) -> None:
+        self._start_health(self.model.page_rows())
+
+    def _check_ticked(self) -> None:
+        accs = self.model.selected_accounts()
+        if not accs:
+            QMessageBox.information(self, "Chưa tick",
+                                    "Hãy tick ít nhất 1 tài khoản.")
+            return
+        self._start_health(accs)
+
+    def _check_all(self) -> None:
+        self._start_health(list(self.accounts))
+
+    def _untick_dead(self) -> None:
+        dead = [a for a in self.model.accounts()
+                if a.health in (HC_DEAD, HC_EXPIRED) and a.selected]
+        if not dead:
+            QMessageBox.information(
+                self, "Không có gì",
+                "Chưa tài khoản nào bị đánh dấu die.\n"
+                "Chuột phải → 'Kiểm tra trạng thái' trước đã.")
+            return
+        for a in dead:
+            a.selected = False
+        self.model._refresh_page()
+        self._refresh_pager()
+        self._log("status", f"Bỏ tick {len(dead)} tài khoản đã die.", "warn")
+
+    def _clear_health_page(self) -> None:
+        for a in self.model.page_rows():
+            a.health, a.health_note, a.health_at = HC_UNKNOWN, "", 0.0
+        self.model._refresh_page()
+        self._refresh_pager()
+
+    def _start_health(self, accounts: list, local_only: bool = False) -> None:
+        accounts = [a for a in accounts if a is not None]
+        if not accounts:
+            return
+        if self.checker.running:
+            QMessageBox.information(self, "Đang kiểm tra",
+                                    "Đang có phiên kiểm tra chạy, xong trước.")
+            return
+        if self.controller.busy:
+            QMessageBox.information(self, "Đang chạy tác vụ",
+                                    "Hãy đợi lượt chạy xong rồi kiểm tra.")
+            return
+        if not local_only and not self._signer_ready:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setWindowTitle("Chưa có sidecar ký")
+            box.setText(
+                "Kiểm tra tài khoản CẦN sidecar ký để tạo chữ ký request.\n"
+                "Nếu không có, chỉ kiểm tra được cookie cục bộ."
+            )
+            box.setInformativeText(
+                "Kiểm tra cục bộ: đọc cookie trong file, không gọi mạng.\n"
+                "  → bắt được tài khoản thiếu phiên / hết hạn ngày,\n"
+                "    nhưng KHÔNG biết tài khoản đã bị TikTok thu hồi phiên.\n\n"
+                "Kiểm tra đầy đủ: cần signer.bat đang chạy."
+            )
+            row = QMessageBox.StandardButton
+            box.setStandardButtons(row.Yes | row.No | row.Cancel)
+            box.button(row.Yes).setText("Chỉ kiểm tra cục bộ")
+            box.button(row.No).setText("Mở hướng dẫn sidecar")
+            r = box.exec()
+            if r == row.No:
+                self.tabs.setCurrentWidget(self.tab_settings)
+                return
+            if r != row.Yes:
+                return
+            local_only = True
+
+        use_proxy = self.cb_pool.isChecked() and not local_only
+        for a in accounts:
+            a.health, a.health_note = HC_CHECKING, ""
+        self.model._refresh_page()
+        self._refresh_pager()
+        self.checker.start(accounts, use_proxy=use_proxy, local_only=local_only)
+        how = ("cục bộ, không gọi mạng" if local_only
+               else ("qua proxy" if use_proxy else "IP máy"))
+        self._log("status",
+                  f"Kiểm tra {len(accounts)} tài khoản ({how})…", "head")
+
+    # ---- nhận kết quả ----
+    def _apply_health(self, acc_id: str, health: str, note: str, at: float) -> None:
+        """Chạy trên GUI thread (queued) — nơi duy nhất chạm vào model."""
+        self.model.update_row(acc_id, health=health, health_note=note,
+                              health_at=at)
+
+    @Slot(int, int)
+    def _on_health_progress(self, done: int, total: int) -> None:
+        c = self.model.health_counts()
+        self.pbar.setValue(int(done * 100 / max(1, total)))
+        self.lbl_stat.setText(
+            f"kiểm tra {done}/{total}  ·  "
+            f"sống {c.get(HC_ALIVE, 0)}  die {c.get(HC_DEAD, 0)}  "
+            f"hết hạn {c.get(HC_EXPIRED, 0)}  "
+            f"không rõ {c.get(HC_RISKY, 0)}"
+        )
+
+    @Slot()
+    def _on_health_done(self) -> None:
+        self.pbar.setValue(0)
+        c = self.model.health_counts()
+        n = self.model.total
+        self.lbl_stat.setText(
+            f"✔ sống {c.get(HC_ALIVE, 0)} · ✖ die {c.get(HC_DEAD, 0)} · "
+            f"⌛ hết hạn {c.get(HC_EXPIRED, 0)} · ? không rõ {c.get(HC_RISKY, 0)}"
+            f" · – chưa kiểm {c.get(HC_UNKNOWN, 0)}   (/{n})"
+        )
+        self._log(
+            "status",
+            f"Xong kiểm tra: sống {c.get(HC_ALIVE, 0)}, "
+            f"die {c.get(HC_DEAD, 0)}, hết hạn {c.get(HC_EXPIRED, 0)}, "
+            f"không rõ {c.get(HC_RISKY, 0)}.",
+            "ok" if c.get(HC_ALIVE, 0) else "warn",
+        )
+        if c.get(HC_RISKY, 0):
+            self._log(
+                "status",
+                f"{c[HC_RISKY]} tài khoản bị TikTok chặn request nên không "
+                f"kết luận được. KHÔNG phải cookie chết. Thử lại sau, hoặc "
+                f"bật proxy để đổi IP.",
+                "warn",
+            )
+        self._refresh_pager()
+        self._refresh_summary()
 
     def _build_task(self) -> QWidget:
         box = QGroupBox("Tác vụ")

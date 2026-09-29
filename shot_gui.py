@@ -12,7 +12,19 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from core.config import MODE_LIKE_CID
-from core.models import ST_DONE, ST_FAIL, ST_OK, ST_RUNNING, Account
+from core.models import (
+    HC_ALIVE,
+    HC_CHECKING,
+    HC_DEAD,
+    HC_EXPIRED,
+    HC_RISKY,
+    HC_UNKNOWN,
+    ST_DONE,
+    ST_FAIL,
+    ST_OK,
+    ST_RUNNING,
+    Account,
+)
 from ui.main_window import MainWindow
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shot.png")
@@ -43,6 +55,18 @@ def build_accounts(n=137):
             a.note = "♥ cid=7654223771003994898 · đã thả tim trước đó (like=88)"
         a.proxy = f"103.28.{i % 255}.{i % 200 + 1}:8080"
         a.proxy_label = f"103.28.{i % 255}.{i % 200 + 1}:8080"
+        # trạng thái sức khoẻ, trộn lẫn để thấy rõ màu cột C
+        h = i % 11
+        if h == 0:
+            a.health, a.health_note = HC_ALIVE, "cookie ổn, hết hạn 2027-01-02"
+        elif h == 1:
+            a.health, a.health_note = HC_DEAD, "cookie thiếu sessionid_ss"
+        elif h == 2:
+            a.health, a.health_note = HC_EXPIRED, "hết hạn 2026-08-14"
+        elif h == 3:
+            a.health, a.health_note = HC_CHECKING, ""
+        elif h == 4:
+            a.health, a.health_note = HC_RISKY, "TikTok chặn IP (10221)"
         out.append(a)
     return out
 

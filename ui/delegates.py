@@ -15,6 +15,13 @@ from PySide6.QtWidgets import (
 
 from core.models import (
     HAS_SESSION_ROLE,
+    HC_ALIVE,
+    HC_CHECKING,
+    HC_DEAD,
+    HC_EXPIRED,
+    HC_RISKY,
+    HC_UNKNOWN,
+    HEALTH_ROLE,
     NO_ROLE,
     ST_DONE,
     ST_FAIL,
@@ -57,6 +64,24 @@ STATUS_COLOR = {
     ST_SKIP: C_SKIP,
 }
 
+# Màu cột Status — xanh là dùng được, đỏ là chết, cam là hết hạn,
+# vàng là "chưa biết" để không nhầm với chết.
+C_H_ALIVE = QColor("#1e9e5a")
+C_H_DEAD = QColor("#e74c3c")
+C_H_EXPIRED = QColor("#d35400")
+C_H_RISKY = QColor("#b8860b")
+C_H_CHECK = QColor("#3d7dd8")
+C_H_UNKNOWN = QColor("#9aa4b2")
+
+HEALTH_COLORS = {
+    HC_ALIVE: C_H_ALIVE,
+    HC_DEAD: C_H_DEAD,
+    HC_EXPIRED: C_H_EXPIRED,
+    HC_RISKY: C_H_RISKY,
+    HC_CHECKING: C_H_CHECK,
+    HC_UNKNOWN: C_H_UNKNOWN,
+}
+
 
 class AccountCellDelegate(QStyledItemDelegate):
     """Vẽ tay: checkbox + username (đậm) + email (xám) trong cùng một ô.
@@ -81,16 +106,119 @@ class AccountCellDelegate(QStyledItemDelegate):
     def row_h(self) -> int:
         return ROW_H if self.compact else ROW_H_TALL
 
+    @staticmethod
+    def _text_area(rect: QRect, used_left: int) -> tuple[int, int]:
+        """Trả (x, w) của vùng chữ trong ô.
+
+        `used_left` = số px đã dùng từ mép trái của ô (ô tick, chấm tròn…),
+        tính từ mép tráI của CHÍNH Ô — không phải toạ độ màn hình.
+
+        Rất dễ sai ở đây: `rect.left()` là toạ độ tuyệt đối trên bảng. Nếu
+        viết `w = rect.width() - rect.left() - ...` thì với cột 1, 2 (left
+        = 520, 940…) w ra số ÂM, bị `max(20, …)` ép về 20px và mọi chữ hiện
+        thành "...". Cột 0 (left = 0) thì vô hại nên lỗi này lọt qua im lặng
+        khi bảng chỉ có 2 cột.
+        """
+        x = rect.left() + used_left
+        w = max(20, rect.width() - used_left - PAD)
+        return x, w
+
     # ------------------------------------------------------------------ #
     def paint(self, painter: QPainter, option, index) -> None:
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self._background(painter, option, index)
-        if index.column() == AccountTableModel.COL_ACCOUNT:
+        col = index.column()
+        if col == AccountTableModel.COL_ACCOUNT:
             self._paint_account(painter, option, index)
+        elif col == AccountTableModel.COL_HEALTH:
+            self._paint_health(painter, option, index)
         else:
             self._paint_status(painter, option, index)
         painter.restore()
+
+    # ------------------------------------------------------------------ #
+    def _paint_health(self, painter: QPainter, option, index) -> None:
+        """Cột Status: chấm màu + nhãn ngắn.
+
+        Vẽ bằng tay như 2 cột kia để giữ đúng 1 dòng ở chế độ gọn.
+        """
+        rect = option.rect
+        health = index.data(HEALTH_ROLE)
+        text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        color = HEALTH_COLORS.get(health, C_IDLE)
+        h = rect.height()
+
+        dot = 5 if self.compact else 7
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawEllipse(
+            QRect(rect.left() + PAD, rect.top() + (h - dot) // 2, dot, dot)
+        )
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        x, w = self._text_area(rect, PAD + dot + 5)
+
+        f1 = QFont()
+        f1.setPointSizeF(FS_MAIN)
+        f1.setBold(True)
+        fm1 = QFontMetrics(f1)
+        note = index.data(Qt.ItemDataRole.ToolTipRole) or ""
+
+        if self.compact:
+            # 1 DÒNG: nhãn + chi tiết, nhãn bao giờ giữ nguyên (cắt chi tiết
+            # trước) để luôn đọc được "Sống" / "Hết hạn" / "Die".
+            label_w = fm1.horizontalAdvance(text)
+            tail = note.strip() if note else ""
+            f2 = QFont()
+            f2.setPointSizeF(FS_SUB)
+            fm2 = QFontMetrics(f2)
+            tail_w = fm2.horizontalAdvance(tail) + 8 if tail else 0
+
+            # Nếu cả hai không vừa, hy sinh chi tiết trước.
+            if label_w + tail_w > w and label_w < w:
+                tail_w = 0
+            if label_w > w:
+                text = fm1.elidedText(text, Qt.TextElideMode.ElideRight, w)
+                label_w = w
+                tail_w = 0
+
+            painter.setFont(f1)
+            painter.setPen(color)
+            painter.drawText(
+                QRect(x, rect.top(), label_w, h),
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                text,
+            )
+            if tail and tail_w and label_w + 8 < w:
+                painter.setFont(f2)
+                painter.setPen(ACC_SUB)
+                painter.drawText(
+                    QRect(x + label_w + 8, rect.top(), w - label_w - 8, h),
+                    int(Qt.AlignmentFlag.AlignLeft
+                        | Qt.AlignmentFlag.AlignVCenter),
+                    fm2.elidedText(tail, Qt.TextElideMode.ElideRight,
+                                   w - label_w - 8),
+                )
+            return
+
+        painter.setFont(f1)
+        painter.setPen(color)
+        painter.drawText(
+            QRect(x, rect.top() + 3, w, 16),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            fm1.elidedText(text, Qt.TextElideMode.ElideRight, w),
+        )
+        if note:
+            f2 = QFont()
+            f2.setPointSizeF(FS_SUB)
+            painter.setFont(f2)
+            painter.setPen(C_NOTE)
+            painter.drawText(
+                QRect(x, rect.top() + 19, w, 16),
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                QFontMetrics(f2).elidedText(note, Qt.TextElideMode.ElideRight, w),
+            )
 
     # ------------------------------------------------------------------ #
     def _background(self, painter: QPainter, option, index) -> None:
@@ -147,8 +275,7 @@ class AccountCellDelegate(QStyledItemDelegate):
         cb.state |= QStyle.StateFlag.State_On if checked else QStyle.StateFlag.State_Off
         QApplication.style().drawControl(QStyle.ControlElement.CE_CheckBox, cb, painter)
 
-        x = rect.left() + NUM_W + PAD + BOX_W
-        w = max(20, rect.width() - x - PAD)
+        x, w = self._text_area(rect, NUM_W + PAD + BOX_W)
         h = rect.height()
 
         f1 = QFont()
@@ -218,8 +345,7 @@ class AccountCellDelegate(QStyledItemDelegate):
         painter.drawEllipse(QRect(rect.left() + PAD, top, dot, dot))
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
-        x = rect.left() + PAD + dot + 5
-        w = max(20, rect.width() - x - PAD)
+        x, w = self._text_area(rect, PAD + dot + 5)
         h = rect.height()
 
         f1 = QFont()

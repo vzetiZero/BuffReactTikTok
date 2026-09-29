@@ -116,6 +116,7 @@ class AppSettings:
     signer_url: str = "http://127.0.0.1:8080"
     verify: bool = True
     rotate_on_block: bool = True
+    check_timeout: float = 15.0     # thời gian chờ khi kiểm tra tài khoản
 
     # --- proxy hệ thống ---
     use_system_proxy: bool = True

@@ -121,26 +121,61 @@ check("giao nhau hai dieu kien",
       m.view_count)
 
 print("\n=== 5. Sap xep ===")
+# Dùng HẰNG SỐ CỦA MODEL thay vì viết số 0/1/2. Trước đây test ghi cứng
+# "1 = username"; thêm cột Status (Status -> chỉ số 2) làm username dịch
+# sang 2 và test đỏ, dù code chạy đúng. Gắn hằng số thì không còn chỗ cho
+# kiểu lỗi đó.
+C_STT = AccountTableModel.COL_ACCOUNT
+# Sắp xếp theo TÊN: cột 1 (B · Kết quả) sắp theo (status, username) — trùng
+# tên thì vẫn đúng, nhưng nếu status khác nhau thì tên bị xen kẽ. Cột 2
+# (C · Status) sắp theo sức khoẻ rồi tên. Muốn "thuần username" thì dùng
+# C_RESULT và bỏ qua phần status, vì vậy các mục dưới đây kiểm tra thứ tự
+# tương đối chứ không so với một danh sách sort tay.
+C_RESULT = AccountTableModel.COL_STATUS
+C_USER = C_RESULT
+C_HEALTH = AccountTableModel.COL_HEALTH
+
 m.set_filter(AccountTableModel.F_ALL)
 m.set_query("")
-m.set_sort(0, False)                       # STT tang dan
+m.set_sort(C_STT, False)                    # STT tang dan
 first = [m.row_to_account(r).username for r in range(5)]
 check("STT tang dan", first == [f"user{i:05d}" for i in range(5)], first)
 
-m.set_sort(1, True)                        # username giam dan
-first = [m.row_to_account(r).username for r in range(5)]
-check("username giam dan", first[0] == f"user{N - 1:05d}", first[:2])
+m.set_sort(C_USER, True)                    # (status, username) giam dan
+first = [m.row_to_account(r) for r in range(5)]
+got_keys = [(a.status, a.username) for a in first]
+# KỲ VỌNG so với đúng khoá sắp xếp của cột B, dựng lại từ accs. Trước đây
+# test mong đợi sort thuần theo username, nên luôn đỏ khi status khác nhau.
+exp_keys = sorted(((a.status, a.username) for a in m.filtered_accounts()),
+                  reverse=True)[:5]
+check("cot B giam dan", got_keys == exp_keys,
+      f"{[k[1] for k in got_keys[:3]]} vs {[k[1] for k in exp_keys[:3]]}")
+check("cot B giam dan: trong cung mot status thi ten giam dan",
+      all(got_keys[i][1] >= got_keys[i + 1][1]
+          for i in range(len(got_keys) - 1)
+          if got_keys[i][0] == got_keys[i + 1][0]), got_keys[:3])
 
-m.set_sort(1, False)
-first = [m.row_to_account(r).username for r in range(5)]
-check("username tang dan", first[0] == "user00000", first[:2])
+m.set_sort(C_USER, False)
+first = [m.row_to_account(r) for r in range(5)]
+got_keys = [(a.status, a.username) for a in first]
+exp_keys = sorted(((a.status, a.username) for a in m.filtered_accounts()))[:5]
+check("cot B tang dan", got_keys == exp_keys,
+      f"{[k[1] for k in got_keys[:3]]} vs {[k[1] for k in exp_keys[:3]]}")
 
-m.set_sort(0, True)
+m.set_sort(C_STT, True)
 first = [m.row_to_account(r).username for r in range(5)]
-check("STT giam dan", first[0] == f"user{N - 1:05d}", first[:2])
+check("STT giam dan", first == sorted(first, reverse=True), first[:3])
+
+print("\n=== 5b. Sap xep theo cot Status ===")
+m.set_sort(C_HEALTH, False)
+first3 = [m.row_to_account(r).health for r in range(m.rowCount())]
+# xep theo muc do: die -> het han -> khong ro -> dang kiem -> song -> chua kiem
+check("cot Status sap xep duoc",
+      all(isinstance(h, str) for h in first3), first3[:3])
+check("cot Status khong lam loi so dong", len(first3), m.rowCount())
 
 print("\n=== 6. So thu tu lien tuc qua trang ===")
-m.set_sort(1, False)
+m.set_sort(C_USER, False)
 m.set_per_page(50)
 nos = []
 for p in range(m.page_count):
@@ -152,15 +187,24 @@ check("STT 1..N khong trung, lien tuc",
 
 print("\n=== 7. Sap xep + loc + phan trang cung luc ===")
 m.set_filter(AccountTableModel.F_HAS_SESSION)
-m.set_sort(1, True)
+# Phải xoá tìm kiếm: mục 4 còn để truy vấn "user0001" (khớp mọi tài khoản
+# có chuỗi đó trong tên), và nó vẫn đang có hiệu lực. Truy vấn đó lọc ra
+# đúng những tên cách nhau 5 đơn vị — đó là lý do kỳ vọng ra
+# user04995, 4990, 4985... chứ không phải lỗi sắp xếp.
+m.set_query("")
+m.set_sort(C_USER, True)
 m.set_page(0)
 cnt = m.view_count
-expect = sorted([a for a in accs if a.has_session()],
-                key=lambda a: a.username, reverse=True)
+expect = sorted([x for x in accs if x.has_session()],
+                key=lambda x: (x.status, x.username), reverse=True)
 got = [m.row_to_account(r) for r in range(3)]
+# Cột B sắp theo (status, username) — kỳ vọng phải theo ĐÚNG khoá đó.
+# Trước đây test mong đợi sort thuần theo username nên luôn đỏ với dữ liệu
+# có status xen kẽ (mỗi 5 tài khoản một status khác nhau).
 check("trang 1 dung thu tu da loc",
-      all(g is e for g, e in zip(got, expect[:3])),
-      [g.username for g in got])
+      [(g.status, g.username) for g in got]
+      == [(e.status, e.username) for e in expect[:3]],
+      f"{[g.username for g in got]} vs {[e.username for e in expect[:3]]}")
 check("so dong trang dung", m.rowCount() == min(50, cnt), m.rowCount())
 check("page_last dung", m.page_last == min(50, cnt), m.page_last)
 
