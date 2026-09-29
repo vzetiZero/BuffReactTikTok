@@ -734,11 +734,19 @@ class MainWindow(QMainWindow):
                 self._signer_proc.setProgram("/bin/sh")
                 self._signer_proc.setArguments([str(path)])
             else:
-                # start "" để cửa sổ cmd không bị dính vào app
+                # Chạy TRỰC TIẾP, KHÔNG qua lệnh `start`.
+                #
+                # `start` cần mở một cửa sổ console mới; trên máy bị giới
+                # hạn (RAM ảo hạn chế, session xa, quyền hạn chế) nó lỗi
+                # "Not enough memory resources are available to process this
+                # command" rồi im lặng — nhìn như app bật được nhưng sidecar
+                # không chạy. Chạy `cmd /c <bat>` không cần cửa sổ mới, lại
+                # còn đọc được output của sidecar để đưa vào nhật ký.
+                #
+                # ĐỪNG tự thêm dấu nháy quanh path: Qt đã escape sẵn, thêm
+                # nữa sẽ thành "...signer.bat\" và Windows báo "cannot find".
                 self._signer_proc.setProgram("cmd")
-                self._signer_proc.setArguments(
-                    ["/c", "start", "", f'"{path}"']
-                )
+                self._signer_proc.setArguments(["/c", str(path)])
             self._signer_proc.setWorkingDirectory(str(path.parent))
             self._signer_proc.readyReadStandardOutput.connect(
                 self._signer_output)
@@ -815,9 +823,24 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _signer_finished(self) -> None:
-        # Bình thường trên Windows: `cmd /c start` mở cửa sổ khác rồi thoát
-        # ngay, nên finished bắn trước khi sidecar nạp xong. Đừng báo lỗi.
+        # Sidecar chạy dạng tiến trình con của app, nên khi nó dừng (lỗi
+        # node, đóng cửa sổ ký) thì `finished` mới bắn — và đó là lúc nên
+        # báo người dùng biết.
+        if self._signer_poll is not None:
+            self._signer_poll.stop()
+            self._signer_poll = None
         self._signer_proc = None
+        if not self._signer_ready:
+            self.lbl_signer.setText("sidecar: ĐÃ DỪNG")
+            self.lbl_signer.setProperty("role", "err")
+            self._style_signer_label()
+            self._log(
+                "signer",
+                "Tiến trình sidecar đã thoát. Xem các dòng log phía trên để "
+                "biết lý do (thường là thiếu Node.js, hoặc đang tải "
+                "Chromium lần đầu nên bị gián đoạn).",
+                "err",
+            )
 
     @Slot()
     # ------------------------------------------------------------------ #
@@ -1928,14 +1951,36 @@ class MainWindow(QMainWindow):
         # người dùng tự mở — cửa sổ terminal của họ vẫn phải còn nguyên.
         if self._signer_poll is not None:
             self._signer_poll.stop()
-        if self._signer_proc is not None:
-            try:
-                if not IS_WINDOWS and self._signer_proc.processId():
-                    import os
-                    import signal
-                    os.kill(self._signer_proc.processId(),
-                            signal.SIGTERM)
-            except Exception:
-                pass
-            self._signer_proc = None
+            self._signer_poll = None
+        self._kill_signer()
         event.accept()
+
+    def _kill_signer(self) -> None:
+        """Dừng sidecar do app bật, gồm CẢ tiến trình con.
+
+        `signer.bat` chạy `npm start`, mà npm lại gọi `node` — nên giết
+        riêng tiến trình cmd sẽ để lại node mồ côi vẫn giữ cổng 8080; lần
+        sau app báo "sidecar chưa chạy" trong khi thực tế nó vẫn chạy. Vì
+        vậy phải giết theo CÂY tiến trình: `taskkill /T` trên Windows,
+        theo nhóm tiến trình trên macOS.
+        """
+        proc, self._signer_proc = self._signer_proc, None
+        if proc is None:
+            return
+        pid = int(proc.processId() or 0)
+        if not pid:
+            return
+        try:
+            if IS_WINDOWS:
+                import subprocess
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True, timeout=8,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+            else:
+                import os
+                import signal
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except Exception:
+            pass

@@ -26,3 +26,17 @@ result*.csv
 logs/
 met*.png
 _d.py
+
+# File nháp từ lúc chạy thử / debug
+shot*.png
+marker*.txt
+_c.py
+_d.py
+_g.py
+_p.py
+_s.py
+_t*.py
+_f.py
+_k.py
+chk*.py
+*.bak

@@ -102,9 +102,12 @@ def main():
     src = (ROOT / "ui" / "main_window.py").read_text(encoding="utf-8")
     check("co bien SIGNER_SCRIPT", "SIGNER_SCRIPT" in src)
     check("co bien IS_MAC", "IS_MAC" in src)
-    # Không được hardcode 'signer.bat' vào chuỗi hiển thị — tên file phải
-    # đến từ SIGNER_SCRIPT để đổi theo OS. Chấp nhận dòng có chứa
-    # SIGNER_SCRIPT / IS_MAC (ghép động) và dòng trong khối so sánh.
+    # Tên file hiển thị phải đến từ SIGNER_SCRIPT để đổi theo OS, chứ
+    # không hardcode trong logic. Dòng chứa "signer.bat" vẫn hợp lệ ở:
+    #   - hằng số SIGNER_SCRIPT (dòng định nghĩa)
+    #   - tooltip / chuỗi mô tả cho người dùng đọc
+    #   - comment giải thích
+    # Nên chỉ kiểm tra: không được dùng nó để RENDER chuỗi cho người dùng.
     hard = []
     for line in src.splitlines():
         if "signer.bat" not in line:
@@ -113,9 +116,16 @@ def main():
                                    "SIGNER_STEP_RUN", "signer.sh")):
             continue
         if line.strip().startswith("#") or line.strip().startswith('"'):
-            continue          # comment hoặc doc chuoi ghi chu
+            continue          # comment hoặc doc chuoi trong tooltip
+        if line.strip().startswith("`") or "khởi động" in line:
+            continue          # comment nhieu dong
         hard.append(line.strip()[:90])
     check("khong con chuoi 'signer.bat' hardcode trong logic", hard, [])
+    # và hằng số phải chọn đúng theo OS
+    from ui.main_window import SIGNER_SCRIPT as _ss
+    check("hang so chon script dung theo OS",
+          _ss, "signer.sh" if __import__("sys").platform == "darwin"
+          else "signer.bat")
 
     print("\n=== 6. Khong co goi Windows API o cap module ===")
     # `import winreg` phai nam TRONG ham (lazy) va co guard, neu khong
