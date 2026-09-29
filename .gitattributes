@@ -1,0 +1,8 @@
+# macOS / Linux
+* text=auto eol=lf
+
+# Batch file PHẢI là CRLF, nếu không Windows chạy lỗi
+*.bat text eol=crlf
+
+# Ảnh chụp màn hình (tạm)
+*.png binary

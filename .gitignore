@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Dữ liệu nhạy cảm — cookie tương đương mật khẩu
+cokie.tik.txt
+*.cookie.txt
+*.csv
+
+# Cài đặt cục bộ (chứa mật khẩu proxy dạng chữ thường)
+settings.json
+.env
+
+# Sidecar ký chữ ký — tải bằng signer.bat, KHÔNG commit
+# (node_modules + Chromium nặng vài trăm MB)
+tiktok-signature/
+
+# Kết quả xuất
+result*.csv
+logs/
+met*.png
+_d.py
