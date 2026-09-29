@@ -81,7 +81,6 @@ from core.settings import (
 )
 from .delegates import AccountCellDelegate
 from .account_picker import AccountPickerDialog
-from .detail_panel import DetailPanel
 from .meter import ThroughputMeter
 from .runlog import RunLogModel, ST_DONE as LG_DONE, ST_FAIL as LG_FAIL, ST_OK as LG_OK, ST_RUN as LG_RUN
 from .settings_tab import SettingsTab
@@ -206,7 +205,6 @@ class MainWindow(QMainWindow):
         self._meter_timer.start()
         self._signer_ticks = 0
 
-        self._refresh_detail_task()
         # Khôi phục danh sách cid của phiên làm việc trước
         if self.settings.cid_list:
             self.in_cid.setPlainText(self.settings.cid_list)
@@ -268,13 +266,10 @@ class MainWindow(QMainWindow):
         # Tab 1: bảng tài khoản — chiếm TOÀN BỘ bề ngang
         self.tab_main = QWidget()
         self.tabs.addTab(self.tab_main, "  Quản lý  ")
-        # Tab 2: tác vụ
-        self.tab_task = QWidget()
-        self.tabs.addTab(self.tab_task, "  Tác vụ  ")
-        # Tab 3: chi tiết + nhật ký (tách ra để bảng không bị thu hẹp)
-        self.tab_detail = QWidget()
-        self.tabs.addTab(self.tab_detail, "  Chi tiết  ")
-        # Tab 4: cài đặt
+        # Đã bỏ tab "Tác vụ" và "Chi tiết": cấu hình nằm sẵn bên phải
+        # màn chính, nhật ký thành dải nhỏ dưới bảng log. Còn lại đúng
+        # 2 tab: màn chính + cài đặt.
+        # Tab 2: cài đặt
         self.tab_settings = SettingsTab(self.settings, self.proxy_pool)
         self.tabs.addTab(self.tab_settings, "  Cài đặt  ")
         root.addWidget(self.tabs, 1)
@@ -312,8 +307,6 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         self._build_main_tab(self.tab_main)
-        self._build_task_tab(self.tab_task)
-        self._build_detail_tab(self.tab_detail)
 
     # ------------------------------------------------------------------ #
     # Tab 1 — bảng tài khoản chiếm trọn bề ngang
@@ -342,6 +335,7 @@ class MainWindow(QMainWindow):
         lv.addWidget(self._build_toolbar())
         lv.addWidget(self._build_pager())
         lv.addWidget(self._build_runlog(), 1)
+        lv.addWidget(self._build_log())
         h.addWidget(left, 1)
 
         # --- phải: cấu hình tác vụ ---
@@ -361,26 +355,6 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     # Tab 3 — thẻ bài viết, thẻ tài khoản, nhật ký
     # ------------------------------------------------------------------ #
-    def _build_detail_tab(self, host: QWidget) -> None:
-        v = QVBoxLayout(host)
-        v.setContentsMargins(8, 8, 8, 8)
-        v.setSpacing(8)
-
-        self.detail = DetailPanel()
-        self.detail.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
-        )
-        v.addWidget(self.detail)
-
-        gb_log = self._build_log()
-        v.addWidget(gb_log, 1)
-
-    def _build_task_tab(self, host: QWidget) -> None:
-        root = QHBoxLayout(host)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.addWidget(self._build_task())
-        root.addStretch(1)
-
     def _build_runlog(self) -> QWidget:
         """Bảng log chạy + thanh thống kê + ô danh sách cid đã xong."""
         box = QGroupBox("Nhật ký chạy")
@@ -540,16 +514,12 @@ class MainWindow(QMainWindow):
         h.addStretch(1)
 
         self.btn_check = QPushButton("Kiểm tra phiên")
-        self.btn_log = QPushButton("☰ Nhật ký")
-        self.btn_log.setObjectName("ghost")
-        self.btn_log.setToolTip("Mở tab Chi tiết (thẻ bài viết, tài khoản, nhật ký)")
         self.btn_run = QPushButton("▶  CHẠY")
         self.btn_stop = QPushButton("■  DỪNG")
         self.btn_run.setObjectName("primary")
         self.btn_stop.setObjectName("danger")
         self.btn_stop.setEnabled(False)
         h.addWidget(self.btn_check)
-        h.addWidget(self.btn_log)
         h.addWidget(self.btn_run)
         h.addWidget(self.btn_stop)
 
@@ -609,7 +579,6 @@ class MainWindow(QMainWindow):
             self.lbl_range.setText("")
             self.lbl_pick.setText(f"đã chọn {sel}/{m.total}")
         self._refresh_pick_stat()
-        self._refresh_summary()
 
     def _apply_row_height(self) -> None:
         """Đặt chiều cao dòng cho bảng log.
@@ -1045,7 +1014,6 @@ class MainWindow(QMainWindow):
                 "warn",
             )
         self._refresh_pager()
-        self._refresh_summary()
 
     def _build_task(self) -> QWidget:
         box = QGroupBox("Tác vụ")
@@ -1268,44 +1236,48 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_log(self) -> QWidget:
-        box = QGroupBox("Nhật ký")
+        """Dải nhật ký gọn ở đáy màn chính.
+
+        Trước đây nhật ký nằm ở tab "Chi tiết" nguyên một khung lớn.
+        Nay chỉ còn dải 4 dòng dưới bảng log — đủ để thấy lỗi và
+        thông báo đầu phiên, mà không cần chuyển sang tab khác.
+        """
+        box = QFrame()
+        box.setProperty("role", "card")
         v = QVBoxLayout(box)
-        v.setSpacing(4)
+        v.setContentsMargins(6, 3, 6, 3)
+        v.setSpacing(2)
+
         self.log_edit = QPlainTextEdit()
         self.log_edit.setObjectName("log")
         self.log_edit.setReadOnly(True)
-        self.log_edit.setMaximumBlockCount(8000)
-        # nhật ký luôn bám sát đáy vùng nhìn thấy
+        self.log_edit.setMaximumBlockCount(4000)
+        self.log_edit.setFixedHeight(76)
         self.log_edit.verticalScrollBar().setValue(999999)
-        v.addWidget(self.log_edit, 1)
+        v.addWidget(self.log_edit)
+
         h = QHBoxLayout()
-        b = QPushButton("Xóa log")
+        h.setSpacing(4)
+        self.lbl_stat = QLabel("")
+        self.lbl_stat.setProperty("role", "hint")
+        h.addWidget(self.lbl_stat, 1)
+        b = QPushButton("Xoá nhật ký")
         b.setObjectName("ghost")
         b.clicked.connect(self.log_edit.clear)
         h.addWidget(b)
-        h.addStretch(1)
-        self.lbl_stat = QLabel("")
-        self.lbl_stat.setProperty("role", "hint")
-        h.addWidget(self.lbl_stat)
         v.addLayout(h)
         return box
 
-    # ------------------------------------------------------------------ #
     def _connect(self) -> None:
         self.btn_load.clicked.connect(self.on_load_file)
         self.btn_check.clicked.connect(lambda: self.start_run(mode=MODE_CHECK))
         self.btn_run.clicked.connect(self.start_run)
         self.btn_stop.clicked.connect(self.on_stop)
-        self.btn_log.clicked.connect(
-            lambda: self.tabs.setCurrentWidget(self.tab_detail)
-        )
         self.in_cid.textChanged.connect(self._on_cid_text_changed)
         self.cb_pool.toggled.connect(self._refresh_proxy_label)
         self.tab_settings.log.connect(self._on_settings_log)
         self.tab_settings.proxies_ready.connect(self._on_proxies_ready)
 
-        # bấm vào dòng -> panel chi tiết bên dưới cập nhật theo
-        self.cb_mode.currentIndexChanged.connect(self._refresh_detail_task)
 
         # Ô "số lượng tài khoản chạy" — dòng báo số thực tế phải cập nhật
         # theo mọi thay đổi: tick/bỏ tick, đổi số, đổi radio.
@@ -1349,23 +1321,9 @@ class MainWindow(QMainWindow):
     # Panel chi tiết
     # ------------------------------------------------------------------ #
     def _on_model_reset(self) -> None:
-        """Model vừa nạp lại / đổi trang -> vẽ lại thanh phân trang và thẻ chi tiết."""
+        """Model vừa nạp lại / đổi bộ lọc -> cập nhật lại số đã chọn."""
         self._refresh_pager()
-        if hasattr(self, "detail"):
-            self.detail.set_account(self.current_account())
-        if hasattr(self, "table"):
-            self._update_sort_indicator()
 
-    def _set_detail_tab_text(self) -> None:
-        """Ghi số lỗi lên tiêu đề tab Chi tiết để thấy ngay từ tab Quản lý."""
-        n = sum(1 for a in self.accounts if a.status == ST_FAIL)
-        self.tabs.setTabText(
-            2, f"  Chi tiết ({n} lỗi)  " if n else "  Chi tiết  "
-        )
-
-    # ------------------------------------------------------------------ #
-    # Khôi phục tham số đã lưu khi mở app lần sau
-    # ------------------------------------------------------------------ #
     def _restore_task_params(self) -> None:
         """Đổi tham số ở tab Tác vụ → lần sau mở app vẫn giữ nguyên.
 
@@ -1411,28 +1369,6 @@ class MainWindow(QMainWindow):
         self._update_thread_hint(self.sp_threads.value())
         self._refresh_pick_stat()
 
-    def _on_selection(self, *_) -> None:
-        """Đồng bộ thẻ tài khoản với dòng đang chọn trong bảng."""
-        acc = self.current_account()
-        self.detail.set_account(acc)
-
-    def current_account(self):
-        """Tài khoản đang chọn. Bảng tài khoản đã bỏ khỏi màn chính nên
-        không còn dòng được chọn — trả None, panel Chi tiết tự xử lý."""
-        return None
-
-    def _refresh_detail_task(self, *_):
-        """Cập nhật thẻ 'tác vụ đang chọn' khi đổi chế độ / nhập cid."""
-        if not hasattr(self, "detail"):
-            return
-        cfg = self._collect_cfg()
-        self.detail.set_task(
-            MODE_LABELS.get(cfg.mode, cfg.mode),
-            cfg.cid, "", cfg.concurrency,
-        )
-        self.detail.set_video("", "", cfg.cid)
-
-    # ------------------------------------------------------------------ #
     def _on_settings_log(self, message: str, level: str) -> None:
         self._log("cài đặt", message, level)
 
@@ -1454,7 +1390,6 @@ class MainWindow(QMainWindow):
             # luôn bằng tổng, chỉ làm nhãn rối mà không thêm thông tin gì.
             self.lbl_pick.setText(f"đã tick {m.selected_count()}/{m.total}")
         self._refresh_pick_stat()
-        self._refresh_summary()
 
     # ------------------------------------------------------------------ #
     # Chọn số lượng tài khoản chạy (ô số + 2 radio)
@@ -1498,21 +1433,6 @@ class MainWindow(QMainWindow):
             f"Sẽ chạy {limit} tài khoản ({how.lower()}) trong "
             f"{ticked} tài khoản đã tick."
         )
-
-    def _refresh_summary(self) -> None:
-        """Cập nhật thẻ TỔNG QUAN ở tab Chi tiết."""
-        if not hasattr(self, "detail"):
-            return
-        rows = self.accounts
-        self.detail.set_stats({
-            "total": len(rows),
-            "selected": sum(1 for a in rows if a.selected),
-            "has_session": sum(1 for a in rows if a.has_session()),
-            "proxied": sum(1 for a in rows if a.proxy),
-            "ok": sum(1 for a in rows if a.status == ST_OK),
-            "fail": sum(1 for a in rows if a.status == ST_FAIL),
-            "last_run": self._last_run or "—",
-        })
 
     def _refresh_proxy_label(self) -> None:
         pool = self.proxy_pool
@@ -1582,7 +1502,6 @@ class MainWindow(QMainWindow):
     def _on_cid_text_changed(self) -> None:
         good, bad = self.parse_cids(self.in_cid.toPlainText())
         self._refresh_cid_label(good, bad, running=0)
-        self._refresh_detail_task()
 
     def _refresh_cid_label(self, good=None, bad=None, running: int = 0) -> None:
         if good is None:
@@ -1713,7 +1632,6 @@ class MainWindow(QMainWindow):
         self.model.select_all_with_session()
         self._refresh_proxy_label()
         self._refresh_pager()
-        self._set_detail_tab_text()
         self._log("head", f"Đã nạp {len(self.accounts)} tài khoản từ {source}", "head")
         n_no = 0
         for a in self.accounts:
@@ -2021,7 +1939,6 @@ class MainWindow(QMainWindow):
         self._log_run_start(accounts, cid)
         self._set_running(True)
         self._refresh_cid_label(running=self._cid_pos + 1)
-        self._refresh_detail_task()
 
         n = len(accounts)
         n_own = sum(1 for a in accounts if a.proxy) if cfg.use_proxy_pool else 0
@@ -2160,9 +2077,6 @@ class MainWindow(QMainWindow):
     def _on_status(self, acc_id: str, status: str, note: str) -> None:
         self.model.update_row(acc_id, status=status, note=note)
         # thẻ chi tiết đang hiển thị tài khoản này -> vẽ lại
-        cur = self.current_account()
-        if cur is not None and cur.id == acc_id:
-            self.detail.set_account(cur)
         if status in (ST_OK, ST_DONE):
             # Ưu tiên dòng gọn kiểu "2 TIM CMT <cid>" để copy đi dùng.
             # Không đọc được cid thì giữ note gốc, không mất thông tin.
@@ -2180,7 +2094,6 @@ class MainWindow(QMainWindow):
                           status=LG_OK, ok=True)
         elif status == ST_FAIL:
             self._log(acc_id, f"✖ {note}", "err")
-            self._set_detail_tab_text()
             self._log_row(acc_id, note=note, status=LG_FAIL, ok=False)
         elif status == ST_SKIP:
             self._log(acc_id, f"– {note or status}", "warn")
@@ -2231,8 +2144,6 @@ class MainWindow(QMainWindow):
             "head",
         )
         self._refresh_pager()
-        self._set_detail_tab_text()
-        self._refresh_summary()
 
         # --- sang cid kế tiếp, trừ khi người dùng bấm DỪNG ---
         if self._queue_paused:

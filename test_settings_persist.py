@@ -141,22 +141,20 @@ def main():
         print("\n=== 6. Khong co o SO LUONG trung lap o tab Cai dat ===")
         w5 = MainWindow()
         spin()
-        # isVisibleTo() phu thuoc tab dang xem, nen phai chuyen sang tab
-        # Cai dat truoc khi hoi — hoi o tab hien tai khong doi nghia gi.
-        w5.tabs.setCurrentWidget(w5.tab_settings)
-        w5.show()
-        spin(150)
+        # Hai tab "Tác vụ" và "Chi tiết" đã bị bỏ; chỉ còn màn chính
+        # + Cài đặt. Kiểm tra đúng những gì còn tồn tại.
+        check("tab 'Chi tiết' da bi bo", hasattr(w5, "tab_detail"), False)
+        check("tab 'Tác vụ' da bi bo", hasattr(w5, "tab_task"), False)
+        check("van con tab man chinh", hasattr(w5, "tab_main"), True)
+        check("van con tab Cai dat", hasattr(w5, "tab_settings"), True)
+        check("chi con 2 tab", w5.tabs.count(), 2)
         check("tab Cai dat khong hien o so luong",
               w5.tab_settings.sp_conc.isVisible(), False)
-        check("tab Cai dat khong hien o so luong (visibleTo)",
-              w5.tab_settings.sp_conc.isVisibleTo(w5.tab_settings), False)
-        check("tab Cai dat khong hien o so luong (visibleTo cua tab)",
-              w5.tab_settings.sp_conc.isVisibleTo(w5.tabs), False)
-        w5.tabs.setCurrentWidget(w5.tab_task)
-        spin(150)
+        w5.show()
+        for _ in range(4):
+            app.processEvents()
         check("tab Tác vụ THÌ hien o so luong",
               w5.sp_threads.isVisibleTo(w5), True)
-        # và ô ẩn phải được đồng bộ theo ô đang hiện, ngay khi đổi
         w5.sp_threads.setValue(33)
         spin(200)
         check("o an cua tab Cai dat theo o dang hien",

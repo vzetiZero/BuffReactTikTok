@@ -162,7 +162,9 @@ def _run(win, dialogs):
     check("pos ve lai -1 hoac het", win._cid_pos in (-1, len(CIDS) - 1), True)
 
     # moi tai khoan phai tha tim 1 lan cho moi cid -> 3 lan
-    notes = [a.note for a in accounts]
+    # Ghi chú thành công nay nằm ở BẢNG LOG (bảng danh sách tài khoản
+    # đã bỏ khỏi màn chính), nên đọc từ win.runlog chứ không phải a.note.
+    notes = [r.note for r in win.runlog._rows]
     print(f"\n  ghi chu tung tai khoan:")
     for a in accounts:
         print(f"    {a.username}: {a.note}")
