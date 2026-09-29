@@ -237,6 +237,43 @@ def main():
                 if ln.strip().startswith("def _signer_output"))
     check("khong co ban trung lap _signer_output", n_out, 1)
 
+    print("\n=== 10. Khong bat trung sidecar khi da co cai san ===")
+    # Da co sidecar chay san (ngoai app) thi KHONG duoc bat them mot cai
+    # nua: cai moi khong bind duoc cong 8080, chet ngay, va app bao
+    # "sidecar DA DUNG" — nguoi dung tuong app hong.
+    from PySide6.QtWidgets import QMessageBox as _QB
+    w3 = MainWindow()
+    for _ in range(3):
+        app.processEvents()
+    ready_real = w3._signer_ready
+    proc_real = w3._signer_proc
+    w3._signer_ready = False
+    w3._signer_proc = None
+    _QB.information = staticmethod(
+        lambda *a, **k: _QB.StandardButton.Ok)
+    _QB.warning = staticmethod(lambda *a, **k: _QB.StandardButton.Ok)
+    w3._start_signer()
+    for _ in range(8):
+        app.processEvents()
+    check("sidecar co san -> khong tao tien trinh moi",
+          w3._signer_proc, None)
+    check("sidecar co san -> danh dau san sang",
+          w3._signer_ready, True)
+    check("sidecar co san -> nhan hien 'sidecar v'",
+          w3.lbl_signer.text().strip().startswith("sidecar ✓"), True)
+    w3._signer_ready = ready_real
+    w3._signer_proc = proc_real
+    # phai giu lai cac dong log de chan doan khi sidecar chet
+    check("co _signer_tail de chan doan",
+          isinstance(w3._signer_tail, list), True)
+    src3 = (ROOT / "ui" / "main_window.py").read_text(encoding="utf-8")
+    check("co kiem tra sidecar chay san TRUOC khi bat",
+          "Sidecar ký đã chạy sẵn" in src3, True)
+    check("co hien nguyen nhan khi sidecar dung",
+          "Dòng cuối của sidecar" in src3, True)
+    check("nhac dong 'cong 8080 da bi chiem'",
+          "8080" in src3, True)
+
     print(f"\n{'='*54}\n  {PASS} pass, {FAIL} fail\n{'='*54}")
     return 1 if FAIL else 0
 

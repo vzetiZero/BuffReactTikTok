@@ -171,6 +171,7 @@ class MainWindow(QMainWindow):
         self._signer_proc: QProcess | None = None
         self._signer_poll: QTimer | None = None
         self._signer_wait: int = 0
+        self._signer_tail: list[str] = []   # vài dòng log gần nhất của sidecar
 
         self._build_ui()
         self._connect()
@@ -709,6 +710,29 @@ class MainWindow(QMainWindow):
                 "Sidecar ký đã được bật từ app này.\n"
                 "Đợi tới khi thanh dưới hiện 'sidecar ✓' rồi bấm CHẠY.")
             return
+
+        # ĐÃ CÓ SIDECAR CHẠY SẴN THÌ ĐỪNG BẬT CÁI THỨ HAI.
+        # Rất hay xảy ra: người dùng đã mở signer.bat ở cửa sổ riêng, hoặc
+        # bấm "Bật sidecar" lần trước mà tiến trình chưa kịp thoát. Cái
+        # thứ hai không bind được cổng 8080 (đã bận) nên chết ngay, và app
+        # báo "sidecar đã dừng" — rất dễ gây hiểu nhầm là app hỏng.
+        from core.signer import Signer
+        try:
+            already = Signer(self.in_signer.text().strip()).health()
+        except Exception:
+            already = None
+        if already and already.get("ready"):
+            self._signer_ready = True
+            self.lbl_signer.setText(
+                f"sidecar ✓ {already.get('generationCount', 0)} chữ ký")
+            self.lbl_signer.setProperty("role", "hint")
+            self._style_signer_label()
+            self._log("signer",
+                      "Sidecar ký đã chạy sẵn (có thể do bạn mở "
+                      f"{SIGNER_SCRIPT} ở cửa sổ khác) — dùng luôn, không "
+                      "cần bật thêm. Bạn có thể bấm CHẠY ngay.", "ok")
+            return
+
         script = SIGNER_SCRIPT
         path = Path.cwd() / script
         if not path.exists():
@@ -764,6 +788,7 @@ class MainWindow(QMainWindow):
         self.lbl_signer.setText("sidecar: ĐANG BẬT…")
         self.lbl_signer.setProperty("role", "warn")
         self._style_signer_label()
+        self._signer_tail.clear()
         self._log("signer",
                   f"Đang bật sidecar ký bằng {script}… "
                   f"Lần đầu phải tải Chromium nên có thể mất vài phút.", "head")
@@ -785,9 +810,14 @@ class MainWindow(QMainWindow):
             data = bytes(self._signer_proc.readAllStandardOutput())
         except RuntimeError:
             return                      # tiến trình đã bị hủy khi đóng app
-        for line in data.decode("utf-8", "replace").splitlines()[-4:]:
+        for line in data.decode("utf-8", "replace").splitlines():
             line = line.strip()
             if line:
+                self._signer_tail.append(line)
+                # giữ vài dòng cuối: khi sidecar chết, đây là manh mối
+                # duy nhất cho biết nó chết vì lý do gì
+                if len(self._signer_tail) > 30:
+                    del self._signer_tail[0]
                 self._log("signer", line, "info")
 
     @Slot()
@@ -841,6 +871,31 @@ class MainWindow(QMainWindow):
                 "Chromium lần đầu nên bị gián đoạn).",
                 "err",
             )
+            # Đưa nguyên nhân lên nút bấm — log thì dễ lướt qua, và người
+            # dùng không biết phải cuộn lên trên.
+            hint = ""
+            tail = "\n".join(self._signer_tail[-6:])
+            if tail:
+                hint = f"\n\nDòng cuối của sidecar:\n{tail}"
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("Sidecar ký đã dừng")
+            box.setText(
+                "Tiến trình ký TikTok vừa thoát, nên mọi request sẽ thất "
+                "bại." + hint
+            )
+            box.setInformativeText(
+                "Cách xử lý:\n"
+                f"  1. Mở tab Chi tiết, đọc dòng log bắt đầu bằng [signer].\n"
+                f"  2. Bấm 'Bật sidecar' lần nữa.\n"
+                "\n"
+                "Nếu nó dừng ngay lập tức, thường là do:\n"
+                "  • Cổng 8080 đã bị chiếm bởi một sidecar khác — đóng cửa\n"
+                "    sổ terminal còn mở, hoặc tắt hẳn sidecar cũ rồi bật lại.\n"
+                "  • Node.js chưa được nhận ra — cài xong phải MỞ LẠI app,\n"
+                "    vì biến PATH của tiến trình đang chạy không tự cập nhật."
+            )
+            box.exec()
 
     @Slot()
     # ------------------------------------------------------------------ #
