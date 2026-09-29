@@ -106,6 +106,7 @@ class AccountCellDelegate(QStyledItemDelegate):
         self._sweep_from: int | None = None
         self._sweep_to: int | None = None
         self._sweep_on = False
+        self._sweep_model = None
 
     def sizeHint(self, option, index) -> QSize:  # noqa: N802
         # `option` có thể là None khi Qt hỏi kích thước ngoài ngữ cảnh vẽ
@@ -443,35 +444,41 @@ class AccountCellDelegate(QStyledItemDelegate):
 
     # ------------------------------------------------------------------ #
     def editorEvent(self, event, model, option, index) -> bool:  # noqa: N802
-        """Bấm vào Ô TICK ở cột A để bật/tắt tài khoản.
+        """O TICK o cot A: bam de bat/tat, KEO de quet hang loat.
 
-        Cần phân biệt 3 vùng, nếu không sẽ nuốt mọi cú bấm ở cột A:
+        Ba vung phai phan biet, neu khong se nuot moi cu bam o cot A:
 
-          1. ô tick           -> bật/tắt tài khoản (delegate xử lý)
-          2. phần chữ, số STT -> chọn dòng, và CHUỘT PHẢI phải mở được
-                                menu ngữ cảnh -> trả False để bảng xử lý
-          3. cột B, C          -> không đụng, trả False
+          1. o tick           -> bam: bat/tat 1 tai khoan
+                                keo:  quet dai dong (tick/bo tick ca loat)
+          2. phan chu, so STT -> chon dong; chuot phai phai mo duoc menu
+          3. cot B, C          -> khong dung, tra False
 
-        Lỗi đã gặp: bản cũ trả True cho MỌI MouseButtonRelease ở cột A
-        (kể cả chuột phải) nên không mở nổi menu ngữ cảnh, và bấm vào
-        phần chữ cũng không chọn được dòng.
+        CANH BAO VE `MouseButtonRelease`: KHONG bao gio dua vao no.
+        Do that: QTableView chi chuyen MouseButtonRelease xuong delegate
+        khi bang tu nhan thao tac keo-chon. Ta tra True cho
+        MouseButtonPress nen Qt giu release lai -- delegate khong he
+        thay no. Ban cu cho release de ket thuc quet, nen sau mot lan
+        quet trang thai "dang quet" con treo: chi can RE chuot qua o
+        tick la dong khac bi tick/bo tick nham, thay vi bam dung 1 cai.
+        Nay ket thuc quet do `end_sweep()`, goi tu event filter tren
+        viewport -- noi nhan duoc release that.
         """
         if index.column() != AccountTableModel.COL_ACCOUNT:
             return False
 
         et = event.type()
 
-        # Chuột phải / giữa: KHÔNG đụng — để bảng mở menu ngữ cảnh.
-        # Phải kiểm kể cả MouseButtonPress, vì nếu nuốt press thì bảng
-        # không báo hiện chuột phải và menu không bao giờ hiện.
+        # Chuot phai / giua: KHONG dung -- de bang mo menu ngu canh.
+        # Phai kiem ca ca MouseButtonPress, vi neu nuot press thi bang
+        # khong bao hieu chuot phai va menu khong bao gio hien.
         if et in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
             if event.button() != Qt.MouseButton.LeftButton:
                 return False
             if not self._in_box(event, index):
                 return False
-            # Bắt đầu quét: đảo trạng thái dòng này trước. Kéo sẽ áp
-            # ĐÚNG trạng thái vừa đảo cho mọi dòng quét qua — giống
-            # quét ô trong Excel.
+            # Bat dau quet: dao trang thai dong nay truoc. Keo se ap
+            # DUNG trang thai vua dao cho moi dong quet qua -- giong
+            # quet o trong Excel.
             want = not (index.data(Qt.ItemDataRole.CheckStateRole)
                         == Qt.CheckState.Checked)
             model.setData(index, Qt.CheckState.Checked if want
@@ -480,16 +487,8 @@ class AccountCellDelegate(QStyledItemDelegate):
             self._sweep_from = index.row()
             self._sweep_to = index.row()
             self._sweep_on = want
-            return True
-
-        if et == QEvent.Type.MouseButtonRelease:
-            if event.button() != Qt.MouseButton.LeftButton:
-                return False
-            if self._sweep_from is None:
-                return False
-            self._sweep_from = None
-            self._sweep_to = None
-            self._sweep_on = False
+            # giữ model lại cho eventFilter dùng khi thả chuột
+            self._sweep_model = model
             return True
 
         if et == QEvent.Type.MouseMove:
@@ -498,14 +497,65 @@ class AccountCellDelegate(QStyledItemDelegate):
             row = self._row_at(event)
             if row is None or row == self._sweep_to:
                 return True
-            # Quét tới đâu áp trạng thái tới đó. set_range_selected chỉ
-            # vẽ lại vùng vừa đổi nên quét nghìn dòng vẫn mượt.
+            # Quet toi dau ap trang thai toi do. set_range_selected chi
+            # ve lai vung vua doi nen quet nghin dong van muot.
             if hasattr(model, "set_range_selected"):
                 model.set_range_selected(self._sweep_to, row, self._sweep_on)
             self._sweep_to = row
             return True
 
         return False
+
+    def end_sweep(self) -> None:
+        """Ket thuc quet -- goi tu event filter khi tha chuot trai."""
+        self._sweep_from = None
+        self._sweep_to = None
+        self._sweep_on = False
+        self._sweep_model = None
+
+    @property
+    def sweeping(self) -> bool:
+        return self._sweep_from is not None
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        """Bắt MouseButtonRelease để kết thúc quét.
+
+        Gắn lên viewport của bảng. Delegate KHÔNG bao giờ thấy release
+        (xem ghi chú ở editorEvent), nên phải bắt ở tầng cao hơn — nơi
+        Qt vẫn gửi tới. Chỉ bắt để dọn trạng thái rồi trả về False,
+        nên không chặn bất kỳ hành vi mặc định nào của QTableView
+        (kể cả chuột phải và kéo chọn dải).
+
+        Ngoài ra bắt cả việc thả chuột RA NGOÀI cửa sổ: khi đó
+        viewport không nhận release, quét sẽ treo vĩnh viễn và mọi
+        lần rê chuột sau đó đều đổi trạng thái nhầm.
+        """
+        if event.type() in (QEvent.Type.MouseButtonRelease,
+                            QEvent.Type.UngrabMouse):
+            if event.type() == QEvent.Type.MouseButtonRelease:
+                if getattr(event, "button", None) and \
+                        event.button() != Qt.MouseButton.LeftButton:
+                    return super().eventFilter(obj, event)
+            if self._sweep_from is not None:
+                # Chuột vừa thả ở dòng nào đó; nếu dòng đó CHƯA được
+                # quét tới (thả nhanh quá, không kịp có MouseMove) thì
+                # áp nốt trạng thái cho nó — nếu không dòng cuối cùng
+                # sẽ bị bỏ sót dù người dùng thấy mình vừa quét tới.
+                try:
+                    pos = event.position().toPoint()
+                except AttributeError:
+                    pos = event.pos()
+                row = self._row_at(_FakePoint(pos))
+                model = getattr(self, "_sweep_model", None)
+                if row is not None and row != self._sweep_to and model \
+                        and hasattr(model, "set_range_selected"):
+                    model.set_range_selected(self._sweep_to or row, row,
+                                             self._sweep_on)
+                self.end_sweep()
+        return super().eventFilter(obj, event)
+
+    def attach_sweep_filter(self, viewport) -> None:
+        viewport.installEventFilter(self)
 
     def _row_at(self, event) -> int | None:
         """Dòng đang chuột ở, tính theo Y trong viewport."""
@@ -532,3 +582,21 @@ class AccountCellDelegate(QStyledItemDelegate):
 
     # nới lề bấm cho ô tick, px
     BOX_PAD = 3
+
+
+class _FakePoint:
+    """Bọc QPoint thành object có `position()`, y hệt QMouseEvent.
+
+    `_row_at()` nhận sự kiện chuột; ở eventFilter ta chỉ có QPoint, nên
+    bọc lại cho dùng chung một hàm thay vì viết lại phép tính.
+    """
+
+    __slots__ = ("_p",)
+
+    def __init__(self, p: QPoint):
+        self._p = p
+
+    def position(self):
+        from PySide6.QtCore import QPointF
+        return QPointF(self._p)
+

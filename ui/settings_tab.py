@@ -287,12 +287,17 @@ class SettingsTab(QWidget):
         f.setVerticalSpacing(5)
         f.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
+        # KHÔNG đặt "Số luồng" / "Thử lại" ở đây nữa: tab Tác vụ đã có,
+        # và có 2 ô cùng tên là người dùng sửa xong bị ô kia ghi đè mà
+        # không biết. Giá trị lấy từ tab Tác vụ khi lưu.
+        # Ô cũ vẫn tồn tại (setValue/setValue trong _sync) để không phá
+        # code đang đọc nó, nhưng không hiện ra giao diện.
         self.sp_conc = QSpinBox()
         self.sp_conc.setRange(1, 500)
-        f.addRow("Số luồng:", self.sp_conc)
+        self.sp_conc.setVisible(False)
         self.sp_retry = QSpinBox()
         self.sp_retry.setRange(0, 10)
-        f.addRow("Thử lại:", self.sp_retry)
+        self.sp_retry.setVisible(False)
         self.in_region = QLineEdit()
         f.addRow("Region:", self.in_region)
         self.in_tz = QLineEdit()
@@ -306,12 +311,15 @@ class SettingsTab(QWidget):
         )
         f.addRow("Ngôn ngữ:", self.in_lang)
         self.in_signer = QLineEdit()
+        self.in_signer.setVisible(False)   # tab Tác vụ đã có
         f.addRow("Sidecar ký:", self.in_signer)
 
+        # Trễ ngẫu nhiên + xác minh like: chỉ ở tab Tác vụ (tránh trùng).
         d = QWidget()
         dh = QHBoxLayout(d)
         dh.setContentsMargins(0, 0, 0, 0)
         dh.setSpacing(4)
+        d.setVisible(False)
         self.sp_dmin = QDoubleSpinBox()
         self.sp_dmax = QDoubleSpinBox()
         for sp in (self.sp_dmin, self.sp_dmax):
@@ -330,6 +338,7 @@ class SettingsTab(QWidget):
         f.addRow("Trễ ngẫu nhiên:", d)
 
         self.cb_verify = QCheckBox("Xác minh số like sau khi thả tim")
+        self.cb_verify.setVisible(False)   # tab Tác vụ đã có
         f.addRow("", self.cb_verify)
         self.cb_rotate = QCheckBox("Tự đổi proxy khi bị chặn IP")
         self.cb_rotate.setToolTip(

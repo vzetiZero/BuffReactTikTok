@@ -8,6 +8,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from .config import MODE_LIKE_CID
 from .proxy import MODE_ROUND_ROBIN, GatewayConfig, ProxyPool
 
 
@@ -139,9 +140,14 @@ class AppSettings:
     last_cookie_file: str = ""
     backend_kind: str = "http"
     remember_accounts: bool = True   # nhớ tài khoản đã nạp, mở lại khỏi nạp
-    per_page: int = 50               # số dòng mỗi trang
+    per_page: int = 0                # 0 = không phân trang, hiện toàn bộ
     cid_list: str = ""               # danh sách cid đang làm việc (nhớ lại)
-    compact_rows: bool = True        # dòng bảng gọn, 50 dòng / 1 trang
+    compact_rows: bool = True        # dòng bảng gọn, nhìn được nhiều dòng
+
+    # --- lựa chọn số lượng tài khoản chạy (tab Tác vụ) ---
+    pick_limit: int = 0              # 0 = chạy hết những gì đã tick
+    pick_how: str = "order"          # "order" = theo thứ tự, "random" = ngẫu nhiên
+    mode: str = MODE_LIKE_CID        # chế độ tác vụ đang chọn
 
     # ------------------------------------------------------------------ #
     def apply_to_pool(self, pool: ProxyPool) -> None:

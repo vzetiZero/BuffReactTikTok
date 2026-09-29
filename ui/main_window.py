@@ -210,6 +210,9 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ #
     def _after_start(self) -> None:
+        # Khôi phục tham số tab Tác vụ TRƯỚC, để _restore_accounts và các
+        # hàm sau thấy đúng giá trị người dùng đã chọn.
+        self._restore_task_params()
         self._restore_accounts()
         if self.settings.proxy_auto_check and self.proxy_pool.has_any():
             self.tabs.setCurrentWidget(self.tab_settings)
@@ -619,6 +622,12 @@ class MainWindow(QMainWindow):
         self.table.horizontalScrollBar().valueChanged.connect(
             lambda *_: self._sync_delegate_geometry()
         )
+        # Delegate không bao giờ nhận MouseButtonRelease (QTableView giữ
+        # lại khi delegate trả True cho press) nên không tự kết thúc
+        # quét được. Gắn event filter lên viewport: nơi nhận release
+        # thật. Filter chỉ dọn trạng thái rồi trả False, không chặn
+        # hành vi nào của bảng.
+        self.delegate.attach_sweep_filter(self.table.viewport())
         v.addWidget(self.table, 1)
         v.addWidget(self._build_pager())
         return box
@@ -1202,14 +1211,25 @@ class MainWindow(QMainWindow):
         fs.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
         self.sp_threads = QSpinBox()
-        self.sp_threads.setRange(1, 200)
-        self.sp_threads.setValue(10)
+        self.sp_threads.setRange(1, 500)
+        # Nạp lại giá trị đã lưu, KHÔNG cứng 10. Trước đây setValue(10)
+        # khiến người dùng đổi xong bấm CHẠY lại bị nhảy về 10 — và bản
+        # ghi trong settings.json cũng không bao giờ được cập nhật.
+        self.sp_threads.setValue(self.settings.concurrency)
         self.sp_threads.setFixedWidth(92)
         self.sp_threads.setToolTip(
             "Tốc độ gần như tuyến tính theo số luồng.\n"
-            "Nên để <= số nhân của CPU × 3."
+            "Nên để <= số nhân của CPU × 3.\n"
+            "Trần thật là sidecar (~360 tài khoản/phút), thêm luồng vượt\n"
+            "trần chỉ tốn RAM mà không nhanh hơn — cần proxy xoay IP mới tăng."
         )
         fs.addRow("Số luồng:", self.sp_threads)
+
+        # Gợi ý nhanh theo máy, tránh phải tự nhớ trần.
+        self.lbl_thread_hint = QLabel("")
+        self.lbl_thread_hint.setProperty("role", "hint")
+        self.lbl_thread_hint.setWordWrap(True)
+        fs.addRow("", self.lbl_thread_hint)
 
         # 2 spinbox cạnh nhau, nhãn "→" nằm GIỮA và cố định bề rộng
         delay = QWidget()
@@ -1355,6 +1375,32 @@ class MainWindow(QMainWindow):
         self.rb_pick_order.toggled.connect(lambda *_: self._refresh_pick_stat())
         self.rb_pick_random.toggled.connect(lambda *_: self._refresh_pick_stat())
 
+        # Mọi tham số chạy ở tab Tác vụ đều lưu NGAY khi đổi, không đợi
+        # bấm CHẠY — nếu chỉ lưu lúc chạy thì đóng app ở giữa chừng thì
+        # mất, và người dùng phải chạy thử mới biết đã lưu chưa.
+        self.sp_threads.valueChanged.connect(self._on_threads_changed)
+        self.sp_retry.valueChanged.connect(lambda v: self._save_param(
+            "retries", v))
+        self.sp_dmin.valueChanged.connect(lambda v: self._save_param(
+            "delay_min", v))
+        self.sp_dmax.valueChanged.connect(lambda v: self._save_param(
+            "delay_max", v))
+        self.cb_verify.toggled.connect(lambda v: self._save_param("verify", v))
+        self.sp_pick.valueChanged.connect(lambda v: self._save_param(
+            "pick_limit", v))
+        self.rb_pick_random.toggled.connect(
+            lambda v: self._save_param("pick_how", (
+                AccountTableModel.PICK_RANDOM if v
+                else AccountTableModel.PICK_ORDER)))
+        self.cb_mode.currentIndexChanged.connect(
+            lambda _i: self._save_param("mode", self.cb_mode.currentData()))
+        self.in_signer.editingFinished.connect(
+            lambda: self._save_param("signer_url", self.in_signer.text().strip()))
+        self.backend_kind.currentIndexChanged.connect(
+            lambda _i: self._save_param("backend_kind",
+                                        self.backend_kind.currentData()))
+        self._update_thread_hint(self.sp_threads.value())
+
         # đổi trang -> cập nhật nhãn đếm
         self.model.modelReset.connect(self._on_model_reset)
         self.model.dataChanged.connect(lambda *_: self._refresh_picker())
@@ -1378,6 +1424,54 @@ class MainWindow(QMainWindow):
         self.tabs.setTabText(
             2, f"  Chi tiết ({n} lỗi)  " if n else "  Chi tiết  "
         )
+
+    # ------------------------------------------------------------------ #
+    # Khôi phục tham số đã lưu khi mở app lần sau
+    # ------------------------------------------------------------------ #
+    def _restore_task_params(self) -> None:
+        """Đổi tham số ở tab Tác vụ → lần sau mở app vẫn giữ nguyên.
+
+        Trước đây mọi ô đều về mặc định (10 luồng, 1 trễ, 1 retry…): sửa
+        xong đóng app là mất trắng. Nay mỗi ô ghi vào settings ngay khi
+        đổi (xem _connect), và hàm này đọc lại khi khởi động.
+        """
+        s = self.settings
+        # blockSignals vì widget đã nối valueChanged -> _save_param; nếu
+        # không, mỗi ô sẽ ghi lại settings một lần lúc khởi động.
+        for widget, value, setter in (
+            (self.sp_threads, s.concurrency, lambda w, v: w.setValue(v)),
+            (self.sp_retry, s.retries, lambda w, v: w.setValue(v)),
+            (self.sp_dmin, s.delay_min, lambda w, v: w.setValue(v)),
+            (self.sp_dmax, s.delay_max, lambda w, v: w.setValue(v)),
+            (self.cb_verify, s.verify, lambda w, v: w.setChecked(v)),
+            (self.in_signer, s.signer_url,
+             lambda w, v: w.setText(v or "http://127.0.0.1:8080")),
+            (self.sp_pick, s.pick_limit, lambda w, v: w.setValue(v)),
+        ):
+            widget.blockSignals(True)
+            try:
+                setter(widget, value)
+            finally:
+                widget.blockSignals(False)
+
+        # radio: 1 trong 2 luôn bật
+        pick_random = (s.pick_how == AccountTableModel.PICK_RANDOM)
+        for rb in (self.rb_pick_order, self.rb_pick_random):
+            rb.blockSignals(True)
+        self.rb_pick_random.setChecked(pick_random)
+        self.rb_pick_order.setChecked(not pick_random)
+        for rb in (self.rb_pick_order, self.rb_pick_random):
+            rb.blockSignals(False)
+
+        i = self.cb_mode.findData(s.mode)
+        if i >= 0:
+            self.cb_mode.setCurrentIndex(i)
+        i = self.backend_kind.findData(s.backend_kind)
+        if i >= 0:
+            self.backend_kind.setCurrentIndex(i)
+
+        self._update_thread_hint(self.sp_threads.value())
+        self._refresh_pick_stat()
 
     def _on_selection(self, *_) -> None:
         """Đồng bộ thẻ tài khoản với dòng đang chọn trong bảng."""
@@ -1423,10 +1517,9 @@ class MainWindow(QMainWindow):
     def _refresh_picker(self) -> None:
         m = self.model
         if m.total:
-            self.lbl_pick.setText(
-                f"đã tick {m.selected_count()}/{m.total}   ·   "
-                f"trang này {sum(1 for a in m.page_rows() if a.selected)}"
-            )
+            # KHÔNG ghi "trang này N" nữa: đã bỏ phân trang nên "trang này"
+            # luôn bằng tổng, chỉ làm nhãn rối mà không thêm thông tin gì.
+            self.lbl_pick.setText(f"đã tick {m.selected_count()}/{m.total}")
         self._refresh_pick_stat()
         self._refresh_summary()
 
@@ -1740,15 +1833,101 @@ class MainWindow(QMainWindow):
         return ""
 
     def _sync_from_settings_tab(self) -> None:
-        """Lấy cấu hình chung từ tab Cài đặt (số luồng, trễ, retries, proxy)."""
+        """Đồng bộ tham số chạy về settings.
+
+        TRƯỚC đây hàm này ghi ĐÈ spinbox bằng giá trị trong settings, nên
+        người dùng sửa "Số luồng" ở tab Tác vụ rồi bấm CHẠY sẽ bị nhảy
+        về giá trị cũ — đúng cảm giác "sửa không được". Nay chiều là
+        ngược lại: spinbox là nguồn, settings nhận theo.
+        """
         s = self.settings
-        self.sp_threads.setValue(s.concurrency)
-        self.sp_retry.setValue(s.retries)
-        self.sp_dmin.setValue(s.delay_min)
-        self.sp_dmax.setValue(s.delay_max)
-        self.cb_verify.setChecked(s.verify)
-        self.in_signer.setText(s.signer_url)
+        s.concurrency = self.sp_threads.value()
+        s.retries = self.sp_retry.value()
+        s.delay_min = self.sp_dmin.value()
+        s.delay_max = self.sp_dmax.value()
+        s.verify = self.cb_verify.isChecked()
+        s.signer_url = self.in_signer.text().strip()
+        # giữ cho ô ẩn ở tab Cài đặt đồng bộ, phòng khi sau này bật lại
+        self.tab_settings.sp_conc.setValue(s.concurrency)
+        self.tab_settings.sp_retry.setValue(s.retries)
+        self.tab_settings.sp_dmin.setValue(s.delay_min)
+        self.tab_settings.sp_dmax.setValue(s.delay_max)
+        self.tab_settings.cb_verify.setChecked(s.verify)
         self.controller._rotate = s.rotate_on_block
+        self._save_settings_quiet()
+
+    def _save_settings_quiet(self) -> None:
+        """Lưu cấu hình, không spam nhật ký.
+
+        Gọi mỗi lần người dùng đổi tham số — nếu cứ ghi log "Đã lưu cấu
+        hình" thì đổi 5 ô sẽ thành 5 dòng log rác. Chỉ báo lỗi thật.
+        """
+        try:
+            self.settings.save()
+        except OSError as e:
+            self._log("cài đặt", f"Không lưu được cấu hình: {e}", "err")
+
+    def _save_param(self, name: str, value) -> None:
+        """Ghi một tham số vào settings rồi lưu. Không log gì khi thành công."""
+        setattr(self.settings, name, value)
+        # giữ các ô ẩn ở tab Cài đặt đồng bộ ngay, phòng khi app bị tắt
+        # đột ngột (mất điện, kill tiến trình) — lúc đó closeEvent không
+        # chạy và closeEvent chỉ là phương án dự phòng.
+        if hasattr(self, "tab_settings"):
+            mirror = {"retries": "sp_retry", "delay_min": "sp_dmin",
+                      "delay_max": "sp_dmax", "verify": "cb_verify",
+                      "signer_url": "in_signer"}.get(name)
+            if mirror:
+                w = getattr(self.tab_settings, mirror, None)
+                if w is not None:
+                    w.blockSignals(True)
+                    try:
+                        (w.setValue if name != "verify" and
+                         name != "signer_url" else
+                         (w.setChecked if name == "verify" else w.setText))(value)
+                    finally:
+                        w.blockSignals(False)
+        self._save_settings_quiet()
+
+    def _on_threads_changed(self, value: int) -> None:
+        """Người dùng đổi số luồng -> lưu ngay để mở lại app còn giữ."""
+        self.settings.concurrency = value
+        # đồng bộ luôn ô ẩn của tab Cài đặt, không đợi tới lúc đóng app —
+        # nếu không thì đóng app bằng cách tắt cửa sổ đột ngột sẽ mất.
+        if hasattr(self, "tab_settings"):
+            self.tab_settings.sp_conc.setValue(value)
+        self._update_thread_hint(value)
+        self._save_settings_quiet()
+
+    def _suggest_threads(self) -> int:
+        """Gợi ý số luồng theo CPU.
+
+        Python không phải nút thắt (phân phối ~5.800 acc/s); nút thắt là
+        sidecar. Nên gợi ý theo CPU nhưng có trần, tránh gợi ý 200 luồng
+        trên máy có 4 nhân rồi người dùng tưởng app treo.
+        """
+        import os as _os
+        try:
+            cores = _os.cpu_count() or 4
+        except Exception:
+            cores = 4
+        return max(4, min(50, cores * 3))
+
+    def _update_thread_hint(self, value: int) -> None:
+        sug = self._suggest_threads()
+        if not hasattr(self, "lbl_thread_hint"):
+            return
+        if value > sug:
+            self.lbl_thread_hint.setText(
+                f"⚠ {value} luồng > gợi ý {sug} cho máy này. "
+                f"Trần thật do sidecar, tăng thêm sẽ chậm hơn chứ không "
+                f"nhanh hơn."
+            )
+        else:
+            self.lbl_thread_hint.setText(
+                f"Gợi ý cho máy này: {sug} luồng. Giá trị được nhớ, "
+                f"mở lại app vẫn giữ."
+            )
 
     def start_run(self, mode: str | None = None, dry_run: bool = False) -> None:
         if self.controller.busy:
@@ -2104,6 +2283,11 @@ class MainWindow(QMainWindow):
             self.controller.wait(4000)
 
         # lưu cấu hình (kể cả mật khẩu proxy — file này tương đương bí mật)
+        # Dong bo o an cua tab Cai dat ve gia tri dang hien o tab Tac vu
+        # TRUOC khi luu. Neu khong, _sync_to_settings() lay sp_conc cu
+        # (mac dinh 10) roi ghi de moi thieu nguoi dung vua chinh — day
+        # chinh la ly do "sua so luong khong duoc, mo lai ve 10".
+        self._sync_from_settings_tab()
         self.tab_settings._sync_to_settings()
         self.settings.last_cookie_file = str(
             self.settings.last_cookie_file or Path.cwd() / "cokie.tik.txt"
