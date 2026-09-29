@@ -80,13 +80,33 @@ from .meter import ThroughputMeter
 from .settings_tab import SettingsTab
 
 # Tên script cài/chạy sidecar, đổi theo hệ điều hành. Trên macOS/Linux không
-# chạy được file .bat, nên thông báo hướng dẫn phải trỏ đúng script.
+# chạy được file .bat, nên thông báo hướng dẫn phải trỏ đúng script — VÀ
+# đúng cả CÁCH mở: Windows bấm đúp được, macOS thì không (phải gõ trong
+# Terminal). Bảo MacBook "mở terminal" là hướng dẫn Windows lọt sang.
 import sys as _sys
 
 IS_MAC = _sys.platform == "darwin"
+IS_WINDOWS = _sys.platform == "win32"
 SIGNER_SCRIPT = "signer.sh" if IS_MAC else "signer.bat"
 SIGNER_HOW = (f"chmod +x {SIGNER_SCRIPT} && ./{SIGNER_SCRIPT}"
               if IS_MAC else f"{SIGNER_SCRIPT}")
+
+if IS_MAC:
+    SIGNER_STEP_RUN = f"chạy lệnh này trong Terminal: {SIGNER_HOW}"
+    SIGNER_STEPS = (
+        "  1. Mở Terminal, cd vào thư mục dự án, chạy:\n"
+        f"       {SIGNER_HOW}\n"
+        "     Nó sẽ tải tiktok-signature + Chromium, cần Internet.\n"
+        "  2. GIỮ cửa sổ terminal đó mở — đó là tiến trình ký.\n"
+    )
+else:
+    SIGNER_STEP_RUN = f"BẤM ĐÚP file {SIGNER_SCRIPT} trong thư mục dự án"
+    SIGNER_STEPS = (
+        f"  1. BẤM ĐÚP file {SIGNER_SCRIPT} trong thư mục dự án.\n"
+        "     Cần Internet: nó sẽ tải tiktok-signature + Chromium.\n"
+        "     Lần đầu mất vài phút, các lần sau sẽ nhanh hơn nhiều.\n"
+        "  2. GIỮ cửa sổ đen mở — đó là tiến trình ký.\n"
+    )
 
 LEVEL_COLOR = {
     "info": "#4a5a6e",
@@ -617,6 +637,40 @@ class MainWindow(QMainWindow):
         vh.setDefaultSectionSize(h)
         # Các section đã tạo có thể đang giữ kích thước cũ.
         vh.resizeSection(0, h)
+
+    @staticmethod
+    def _node_installed() -> bool:
+        """Node.js có trong PATH không? (chạy ngoài, có timeout ngắn)"""
+        import subprocess
+        exe = "node"
+        try:
+            r = subprocess.run(
+                [exe, "-v"], capture_output=True, text=True, timeout=5,
+                creationflags=(subprocess.CREATE_NO_WINDOW
+                               if IS_WINDOWS else 0),
+            )
+            return r.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            # Trên Windows `node` có thể nằm trong PATH nhưng là file .cmd
+            # cần gọi qua shell; thử thêm bằng `where`/`which`.
+            for probe in (("where", "node") if IS_WINDOWS else ("which", "node")):
+                try:
+                    r2 = subprocess.run(
+                        list(probe), capture_output=True, text=True,
+                        timeout=5,
+                        creationflags=(subprocess.CREATE_NO_WINDOW
+                                       if IS_WINDOWS else 0),
+                    )
+                    if r2.returncode == 0 and r2.stdout.strip():
+                        return True
+                except (OSError, subprocess.SubprocessError):
+                    continue
+            return False
+
+    @staticmethod
+    def _signer_dir_installed() -> bool:
+        """Thư mục sidecar đã tải về chưa (tức đã chạy signer ít nhất 1 lần)."""
+        return (Path.cwd() / "tiktok-signature" / "node_modules").is_dir()
 
     # ------------------------------------------------------------------ #
     # Kiểm tra trạng thái tài khoản (chuột phải)
@@ -1234,15 +1288,25 @@ class MainWindow(QMainWindow):
         self._style_signer_label()
 
     def _signer_fail(self, err: str) -> None:
-        self.lbl_signer.setText("sidecar: CHƯA CHẠY")
+        # Phân biệt "chưa cài Node.js" với "cài rồi nhưng chưa bật sidecar" —
+        # hai lỗi này dễ bị nhầm làm một, nhưng cách sửa hoàn toàn khác nhau.
+        if not self._node_installed():
+            self.lbl_signer.setText("sidecar: THIẾU NODE.JS")
+            cause = "máy này chưa cài Node.js (cần cho sidecar ký)"
+        elif not self._signer_dir_installed():
+            self.lbl_signer.setText("sidecar: CHƯA CÀI")
+            cause = "chưa từng chạy signer — còn thiếu tiktok-signature"
+        else:
+            self.lbl_signer.setText("sidecar: CHƯA CHẠY")
+            cause = "sidecar đã cài nhưng tiến trình đang không chạy"
         self.lbl_signer.setProperty("role", "err")
         self._style_signer_label()
         self._log(
             "signer",
             "CHƯA CÓ SIDECAR KÝ → mọi request TikTok sẽ thất bại.\n"
-            "  Nguyên nhân : tiến trình Node ký chưa chạy.\n"
-            f"  Cách sửa   : chạy {SIGNER_HOW} (1 lần),\n"
-            f"               GIỮ cửa sổ terminal đó mở,\n"
+            f"  Nguyên nhân : {cause}.\n"
+            f"  Cách sửa   : {SIGNER_STEP_RUN} (1 lần),\n"
+            f"               GIỮ cửa sổ đó mở,\n"
             f"               rồi bấm 'Kiểm tra lại' ở thanh dưới.\n"
             f"  Chi tiết   : {self._short_err(err)}",
             "err",
@@ -1408,19 +1472,46 @@ class MainWindow(QMainWindow):
             box = QMessageBox(self)
             box.setIcon(QMessageBox.Icon.Critical)
             box.setWindowTitle("Chưa có sidecar ký")
-            box.setText(
-                "Chưa kết nối được sidecar ký nên mọi request TikTok đều thất bại.\n\n"
-                "Bấm CHẠY bây giờ sẽ khiến tất cả tài khoản báo lỗi."
-            )
-            box.setInformativeText(
-                "Cách sửa:\n"
-                f"  1. Mở terminal trong thư mục dự án, chạy:\n"
-                f"       {SIGNER_HOW}\n"
-                "     Nó sẽ tải tiktok-signature + Chromium, cần Internet.\n"
-                "  2. GIỮ cửa sổ terminal đó mở — đó là tiến trình ký.\n"
-                "  3. Quay lại đây, bấm nút 'Kiểm tra lại' ở thanh dưới.\n\n"
-                "Muốn chỉ xem thao tác chạy thì chọn Backend = mock."
-            )
+            # Chẩn đoán nguyên nhân thật, đừng chỉ nói chung chung "chưa có
+            # sidecar". Ba trường hợp rất khác nhau và cách sửa khác nhau:
+            #   1. Chưa bao giờ cài  -> thiếu Node.js
+            #   2. Đã cài nhưng chưa bật -> cần mở sidecar
+            #   3. Đang khởi động -> chờ thêm
+            if not self._node_installed():
+                box.setIcon(QMessageBox.Icon.Critical)
+                box.setText(
+                    "Máy này CHƯA CÀI NODE.JS.\n\n"
+                    "Sidecar ký cần Node.js. Chưa có nó thì mọi request TikTok "
+                    "đều thất bại, dù bạn tick bao nhiêu tài khoản."
+                )
+                box.setInformativeText(
+                    "Cách sửa:\n"
+                    + (f"  1. Mở https://nodejs.org/ , tải bản .pkg và cài.\n"
+                       "     Chọn bản LTS (Node 18 trở lên là đủ).\n"
+                       "     Cài xong PHẢI đóng rồi mở lại cửa sổ Terminal,\n"
+                       "     vì biến PATH cũ chỉ có tác dụng ở cửa sổ mới.\n"
+                       if IS_MAC else
+                       f"  1. Mở https://nodejs.org/ , tải bản .msi và cài.\n"
+                       "     Chọn bản LTS (Node 18 trở lên là đủ).\n"
+                       "     Sau khi cài, đóng mọi cửa sổ cmd/PowerShell đang\n"
+                       "     mở rồi mở lại, vì biến PATH cũ chỉ có tác dụng ở\n"
+                       "     cửa sổ mới.\n")
+                    + f"  2. Sau đó {SIGNER_STEP_RUN}\n"
+                    "  3. Quay lại app, bấm 'Kiểm tra lại' ở thanh dưới.\n\n"
+                    "Chưa muốn cài Node? Chọn Backend = mock để xem thao tác chạy."
+                )
+            else:
+                box.setText(
+                    "Chưa kết nối được sidecar ký nên mọi request TikTok đều "
+                    "thất bại.\n\n"
+                    "Bấm CHẠY bây giờ sẽ khiến tất cả tài khoản báo lỗi."
+                )
+                box.setInformativeText(
+                    "Cách sửa:\n"
+                    + SIGNER_STEPS
+                    + "  3. Quay lại đây, bấm nút 'Kiểm tra lại' ở thanh dưới.\n\n"
+                    "Muốn chỉ xem thao tác chạy thì chọn Backend = mock."
+                )
             # QMessageBox dùng StandardButton CỦA NÓ, không phải của
             # QDialogButtonBox — trộn hai enum này sẽ vỡ ngay khi bấm CHẠY
             # mà sidecar chưa chạy.

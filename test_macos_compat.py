@@ -36,6 +36,7 @@ def check(label, got, want=True):
 
 def main():
     from PySide6.QtWidgets import QApplication
+    from ui.main_window import MainWindow
     app = QApplication.instance() or QApplication([])
 
     print("\n=== 1. Script cai dat / chay / sidecar ===")
@@ -120,8 +121,6 @@ def main():
     check("co nhanh macOS scutil", "scutil" in src_p)
 
     print("\n=== 7. Code chay duoc tren OS hien tai ===")
-    check("platform", sys.platform, sys.platform)   # chỉ để in
-    print(f"       -> đang chạy trên {sys.platform}")
     r = subprocess.run(
         [sys.executable, "-c",
          "import core.tiktok, core.health, core.models, core.proxy, "
@@ -130,10 +129,64 @@ def main():
     check("import moi module khong loi", r.returncode, 0)
     if r.returncode:
         print("      ", r.stderr.strip()[-300:])
+    print(f"       -> đang chạy trên {sys.platform}")
+
+    print("\n=== 7. Huong dan sidecar dung cach mo theo tung OS ===")
+    from ui.main_window import (
+        IS_MAC,
+        SIGNER_SCRIPT,
+        SIGNER_STEP_RUN,
+        SIGNER_STEPS,
+    )
+    import sys as _s2
+    if _s2.platform == "darwin":
+        check("macOS: dung signer.sh", SIGNER_SCRIPT, "signer.sh")
+        check("macOS: huong dan qua Terminal", "Terminal" in SIGNER_STEPS, True)
+        # macOS KHÔNG bấm đúp được .sh trong Finder -> không được bảo bấm đúp
+        check("macOS: khong bao 'bam dup'", "BẤM ĐÚP" in SIGNER_STEP_RUN, False)
+        check("macOS: co lenh chmod", "chmod" in SIGNER_STEP_RUN, True)
+    else:
+        check("Windows: dung signer.bat", SIGNER_SCRIPT, "signer.bat")
+        check("Windows: bao 'BAM DUP' (bat duoc file .bat)",
+              "BẤM ĐÚP" in SIGNER_STEP_RUN, True)
+        check("Windows: khong bao dung lenh Terminal",
+              "Terminal" in SIGNER_STEP_RUN, False)
+    check("buoc 1 + 2 deu co trong SIGNER_STEPS",
+          ("  1." in SIGNER_STEPS and "  2." in SIGNER_STEPS), True)
+    check("nhac giu cua so mo (roi terminal)",
+          "GIỮ" in SIGNER_STEPS, True)
+    check("nhac Internet cho lan tai dau", "Internet" in SIGNER_STEPS, True)
+
+    print("\n=== 8. Chan doan nguyen nhan sidecar ===")
+    from PySide6.QtWidgets import QApplication as _QA
+    w = MainWindow()
+    check("co ham _node_installed", hasattr(w, "_node_installed"))
+    check("co ham _signer_dir_installed", hasattr(w, "_signer_dir_installed"))
+    # Gọi được và trả bool (không được ném exception)
+    check("_node_installed() tra bool", isinstance(w._node_installed(), bool))
+    check("_signer_dir_installed() tra bool",
+          isinstance(w._signer_dir_installed(), bool))
+    # _signer_fail phải phân biệt được 3 trường hợp
+    real_node, real_dir = w._node_installed, w._signer_dir_installed
+    w._node_installed = lambda: False
+    w._signer_dir_installed = lambda: True
+    w._signer_fail("refused")
+    check("khong co Node -> nhan 'THIEU NODE.JS'",
+          "NODE" in w.lbl_signer.text().upper(), True)
+    w._node_installed = lambda: True
+    w._signer_dir_installed = lambda: False
+    w._signer_fail("refused")
+    check("co Node nhung chua cai sidecar -> nhan 'CHUA CAI'",
+          "CÀI" in w.lbl_signer.text().upper(), True)
+    w._node_installed = lambda: True
+    w._signer_dir_installed = lambda: True
+    w._signer_fail("refused")
+    check("da cai nhung khong chay -> nhan 'CHUA CHAY'",
+          "CHƯA CHẠY" in w.lbl_signer.text().upper(), True)
+    w._node_installed, w._signer_dir_installed = real_node, real_dir
 
     print(f"\n{'='*54}\n  {PASS} pass, {FAIL} fail\n{'='*54}")
     return 1 if FAIL else 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

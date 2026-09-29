@@ -82,10 +82,14 @@ if not exist "node_modules" (
     echo [3/4] Thu vien da co, bo qua.
 )
 
-if not exist "node_modules\puppeteer" (
-    echo [4/4] Tai Chromium cho Puppeteer ...
-    "%NPM%" exec --yes puppeteer browsers install chrome
-)
+REM ---- 4. Chromium cho Puppeteer ----
+REM server.mjs CHI doc PUPPETEER_EXECUTABLE_PATH truoc, roi moi thu tu tim
+REM theo mac dinh. Tren macOS no tra ve duong dan CUNG
+REM "/Applications/Google Chrome.app/..." — neu may khong cai Chrome o
+REM dung cho do, sidecar se KHONG khoi dong duoc. Tai san mot ban Chrome
+REM cua Puppeteer va chi danh dung ban do.
+echo [4/4] Tai Chromium cho Puppeteer ...
+"%NPM%" exec --yes puppeteer browsers install chrome
 if not exist ".env" if exist ".env.example" (
     copy ".env.example" ".env" >nul
     echo       Da tao .env tu .env.example
@@ -93,12 +97,21 @@ if not exist ".env" if exist ".env.example" (
 popd
 
 :open
+cd /d "%DIR%"
+
+REM ---- tro Puppeteer ve dung ban Chrome da tai ----
+for /f "usebackq delims=" %%p in (`node -e "import('puppeteer').then(m=>console.log(m.default.executablePath()))" 2^>nul`) do set "CHROME_PATH=%%p"
+if defined CHROME_PATH (
+    if exist "!CHROME_PATH!" (
+        set "PUPPETEER_EXECUTABLE_PATH=!CHROME_PATH!"
+        echo   Dung trinh duyet: !CHROME_PATH!
+    )
+)
 echo.
 echo ==========================================================
 echo   Khoi dong sidecar tren cong %PORT%...
 echo   GIU cua so nay mo. Bam Ctrl+C de dung.
 echo ==========================================================
 echo.
-cd /d "%DIR%"
 "%NPM%" start
 endlocal

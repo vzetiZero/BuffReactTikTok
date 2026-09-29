@@ -64,15 +64,13 @@ else
     fi
 
     # ---- 4. Chromium cho Puppeteer ----
-    # Trên Apple Silicon, Chromium của Puppeteer tải bản arm64 riêng. Nếu
-    # không có bước này thì sidecar báo "Could not find Chrome".
-    if [ ! -d "node_modules/puppeteer" ]; then
-        echo "[4/4] Tải Chromium cho Puppeteer ..."
-        npm install puppeteer
-    else
-        echo "[4/4] Puppeteer đã có."
-    fi
-    # Cài browser (idempotent — đã có thì bỏ qua)
+    # QUAN TRỌNG (macOS): server.mjs của tiktok-signature trả về đường dẫn
+    # CỨNG "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".
+    # Nếu máy không cài Google Chrome đúng chỗ đó, Puppeteer sẽ không tìm
+    # được trình duyệt và sidecar không khởi động được. Vì vậy bước này tải
+    # sẵn một bản Chrome của riêng Puppeteer rồi chỉ đường dẫn cho nó qua
+    # biến PUPPETEER_EXECUTABLE_PATH (đây là biến mà server đọc ĐẦU TIÊN).
+    echo "[4/4] Tải Chromium cho Puppeteer ..."
     npx --yes puppeteer browsers install chrome || \
         echo "  [Cảnh báo] Không tải được Chrome qua Puppeteer."
 
@@ -83,6 +81,21 @@ else
 fi
 
 cd "$DIR"
+
+# ---- trỏ Puppeteer về đúng bản Chrome đã tải ----
+CHROME_PATH="$(node -e 'import("puppeteer").then(m=>console.log(m.default.executablePath()))' 2>/dev/null || true)"
+if [ -n "$CHROME_PATH" ] && [ -x "$CHROME_PATH" ]; then
+    export PUPPETEER_EXECUTABLE_PATH="$CHROME_PATH"
+    echo
+    echo "  Dùng trình duyệt: $CHROME_PATH"
+elif [ -f "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]; then
+    export PUPPETEER_EXECUTABLE_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    echo "  Dùng Google Chrome đã cài trên máy."
+else
+    echo
+    echo "  [CẢNH BÁO] Không tìm thấy Chrome. Sidecar có thể không khởi động."
+fi
+
 echo
 echo "=========================================================="
 echo "  Khởi động sidecar trên cổng $PORT ..."
