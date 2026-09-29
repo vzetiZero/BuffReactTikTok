@@ -241,12 +241,39 @@ QFrame[role="card"] {{
 """
 
 
+def ui_font_family() -> str:
+    """Font giao diện, chọn theo những font CÓ THẬT trên máy.
+
+    "Segoe UI" là font của Windows, không có trên macOS. Gọi
+    `QFont().setFamily("Segoe UI")` trên Mac sẽ âm thầm rơi về font mặc
+    định của hệ thống (thường là serif — trông lạc lõng) mà KHÔNG báo lỗi.
+    Vì vậy phải dò xem font nào thực sự tồn tại rồi mới dùng.
+    """
+    from PySide6.QtGui import QFont, QFontDatabase
+
+    try:
+        have = set(QFontDatabase.families())
+    except Exception:      # pragma: no cover - môi trường lạ
+        have = set()
+    for name in ("Segoe UI",          # Windows
+                 "SF Pro Text",       # macOS (system font)
+                 "Helvetica Neue",    # macOS
+                 "Inter",             # có thể đã cài
+                 "DejaVu Sans",       # Linux
+                 "Arial"):            # chắc chắn có ở mọi nơi
+        if name in have:
+            return name
+    # Danh sách rỗng (ví dụ chạy headless/offscreen) thì không có cách nào
+    # dò font — trả về rỗng và để Qt tự chọn, thay vì trả tên bịa.
+    return QFont().defaultFamily() or ""
+
+
 def apply(app) -> None:
     """Đặt font mặc định nhỏ trước, rồi áp stylesheet."""
     from PySide6.QtGui import QFont
 
     f = QFont()
-    f.setFamily("Segoe UI")
+    f.setFamily(ui_font_family())
     f.setPixelSize(FS_BASE)
     app.setFont(f)
     app.setStyleSheet(QSS)

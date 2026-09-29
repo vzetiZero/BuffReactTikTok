@@ -4,16 +4,29 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .proxy import MODE_ROUND_ROBIN, GatewayConfig, ProxyPool
 
 
-def default_path() -> Path:
+def config_dir() -> Path:
+    """Thư mục cấu hình, đúng quy ước của từng hệ điều hành.
+
+    macOS KHÔNG đặt biến APPDATA. Nếu chỉ kiểm tra APPDATA rồi rơi về
+    `~/.config` thì trên Mac file nằm ở chỗ lạ (không phải
+    ~/Library/Application Support như mọi app khác), và nếu sau này đổi
+    logic thì người dùng mất sạch cấu hình cũ. Vì vậy tách riêng từng OS.
+    """
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "TikTokManager"
     base = os.environ.get("APPDATA") or os.environ.get("XDG_CONFIG_HOME")
-    root = Path(base) if base else Path.home() / ".config"
-    return root / "TikTokManager" / "settings.json"
+    return (Path(base) if base else Path.home() / ".config") / "TikTokManager"
+
+
+def default_path() -> Path:
+    return config_dir() / "settings.json"
 
 
 def accounts_cache_path() -> Path:

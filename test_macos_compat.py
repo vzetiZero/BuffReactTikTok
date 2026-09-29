@@ -1,0 +1,139 @@
+"""Kiểm tra khả năng chạy trên macOS — các điểm khác biệt với Windows.
+
+Những chỗ dễ vỡ nhất khi đổi hệ điều hành (vì trên Windows chạy ngon nên
+dễ tưởng không có vấn đề gì):
+
+  1. `.bat` không chạy được trên macOS/Linux — cần `.sh` kèm theo
+  2. `APPDATA` không tồn tại trên macOS → đường dẫn cấu hình
+  3. Font "Segoe UI" không có trên macOS → rơi về font mặc định
+  4. Thông báo hướng dẫn phải trỏ đúng script của từng OS
+
+Chạy:  python test_macos_compat.py
+"""
+
+import os
+import pathlib
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+ROOT = pathlib.Path(__file__).parent
+
+PASS, FAIL = 0, 0
+
+
+def check(label, got, want=True):
+    global PASS, FAIL
+    if got == want:
+        PASS += 1
+        print(f"  OK   {label}")
+    else:
+        FAIL += 1
+        print(f"  FAIL {label}\n        got  {got!r}\n        want {want!r}")
+
+
+def main():
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+
+    print("\n=== 1. Script cai dat / chay / sidecar ===")
+    for name, must in (("install.sh", "install"), ("start.sh", "main.py"),
+                       ("signer.sh", "npm start")):
+        p = ROOT / name
+        check(f"{name} ton tai", p.exists())
+        if p.exists():
+            t = p.read_text(encoding="utf-8")
+            check(f"{name} co shebang bash", t.startswith("#!/usr/bin/env bash"))
+            check(f"{name} co lenh '{must}'", must in t)
+            # Không được dùng lệnh Windows
+            for bad in ("taskkill", "ipconfig", "netstat", "chcp ",
+                        "%APPDATA%", r"%~dp0", "powershell"):
+                check(f"{name} khong dung '{bad}'", bad not in t)
+
+    print("\n=== 2. Thoi gian: .sh phai LF, .bat phai CRLF ===")
+    # .bat chạy sai (hoặc không chạy) nếu xuống dòng LF
+    for name in ("install.sh", "start.sh", "signer.sh"):
+        raw = (ROOT / name).read_bytes()
+        check(f"{name} xuong dong LF", b"\r\n" not in raw)
+        check(f"{name} co newline cuoi file", raw.endswith(b"\n"))
+
+    print("\n=== 3. Duong dan cau hinh theo tung OS ===")
+    from core.settings import config_dir, default_path
+    import sys as _s
+    d = config_dir()
+    if _s.platform == "darwin":
+        check("macOS: dung Library/Application Support",
+              "Library/Application Support" in str(d), True)
+    else:
+        check("khong phai mac: dung APPDATA hoac XDG",
+              (os.environ.get("APPDATA") or os.environ.get("XDG_CONFIG_HOME")
+               or ".config") in str(d), True)
+    check("default_path la settings.json", default_path().name,
+          "settings.json")
+    check("cau hinh nam trong thu muc TikTokManager",
+          "TikTokManager" in str(d), True)
+
+    print("\n=== 4. Font — khong giu ten font khong ton tai tren OS nay ===")
+    from PySide6.QtGui import QFontDatabase
+    from ui.style import ui_font_family
+    have = set(QFontDatabase.families())
+    fam = ui_font_family()
+    # Chạy headless (QT_QPA_PLATFORM=offscreen) thì Qt KHÔNG liệt kê được
+    # font nào — khi đó hàm phải trả rỗng để Qt tự chọn, chứ không được bịa
+    # ra một tên font. Vì vậy chỉ kiểm tra nghiêm khi thật sự có danh sách.
+    if not have:
+        check("headless: tra ve chuoi rong (de Qt tu chon)", fam, "")
+        print("       -> offscreen không liệt kê được font, bỏ qua kiểm tra tên")
+    else:
+        check("tra ve 1 ten font", bool(fam), True)
+        check("font chon da TON TAI tren may nay", fam in have, True)
+        check("khong phai font mac dinh (da qua logic)",
+              fam in ("Segoe UI", "SF Pro Text", "Helvetica Neue",
+                      "Inter", "DejaVu Sans", "Arial"), True)
+        print(f"       -> chọn: {fam}")
+    # Bất kể có liệt kê được hay không, KHÔNG được trả về font không tồn tại
+    if have and fam:
+        check("khong tra ve font bia", fam in have, True)
+
+    print("\n=== 5. Thong bao trong app tro ve script dung ===")
+    src = (ROOT / "ui" / "main_window.py").read_text(encoding="utf-8")
+    check("co bien SIGNER_SCRIPT", "SIGNER_SCRIPT" in src)
+    check("co bien IS_MAC", "IS_MAC" in src)
+    # Không được hardcode 'signer.bat' vào chuỗi hiển thị nữa
+    hard = [l for l in src.splitlines()
+            if "signer.bat" in l and "SIGNER_SCRIPT" not in l
+            and "IS_MAC" not in l]
+    check("khong con chuoi 'signer.bat' hardcode", hard, [])
+
+    print("\n=== 6. Khong co goi Windows API o cap module ===")
+    # `import winreg` phai nam TRONG ham (lazy) va co guard, neu khong
+    # macOS se crash ngay khi import.
+    src_p = (ROOT / "core" / "proxy.py").read_text(encoding="utf-8")
+    top_level = []
+    for i, l in enumerate(src_p.splitlines(), 1):
+        if l.startswith(("import ", "from ")) and "winreg" in l:
+            top_level.append((i, l.strip()))
+    check("winreg khong import o cap module", top_level, [])
+    check("co guard 'chi ton tai tren Windows'", "chỉ tồn tại trên Windows" in src_p)
+    check("co nhanh macOS scutil", "scutil" in src_p)
+
+    print("\n=== 7. Code chay duoc tren OS hien tai ===")
+    check("platform", sys.platform, sys.platform)   # chỉ để in
+    print(f"       -> đang chạy trên {sys.platform}")
+    r = subprocess.run(
+        [sys.executable, "-c",
+         "import core.tiktok, core.health, core.models, core.proxy, "
+         "core.settings, core.runner, ui.style; print('ok')"],
+        capture_output=True, text=True, cwd=str(ROOT))
+    check("import moi module khong loi", r.returncode, 0)
+    if r.returncode:
+        print("      ", r.stderr.strip()[-300:])
+
+    print(f"\n{'='*54}\n  {PASS} pass, {FAIL} fail\n{'='*54}")
+    return 1 if FAIL else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

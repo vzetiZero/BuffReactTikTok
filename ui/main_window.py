@@ -79,6 +79,15 @@ from .detail_panel import DetailPanel
 from .meter import ThroughputMeter
 from .settings_tab import SettingsTab
 
+# Tên script cài/chạy sidecar, đổi theo hệ điều hành. Trên macOS/Linux không
+# chạy được file .bat, nên thông báo hướng dẫn phải trỏ đúng script.
+import sys as _sys
+
+IS_MAC = _sys.platform == "darwin"
+SIGNER_SCRIPT = "signer.sh" if IS_MAC else "signer.bat"
+SIGNER_HOW = (f"chmod +x {SIGNER_SCRIPT} && ./{SIGNER_SCRIPT}"
+              if IS_MAC else f"{SIGNER_SCRIPT}")
+
 LEVEL_COLOR = {
     "info": "#4a5a6e",
     "ok": "#1e9e5a",
@@ -232,7 +241,8 @@ class MainWindow(QMainWindow):
         self.lbl_info = QLabel("Chưa có dữ liệu")
         self.statusBar().addWidget(self.lbl_info, 1)
         self.lbl_signer = QLabel("sidecar: ?")
-        self.lbl_signer.setToolTip("Tiến trình ký request TikTok (chạy bằng signer.bat)")
+        self.lbl_signer.setToolTip(
+            f"Tiến trình ký request TikTok (chạy bằng {SIGNER_SCRIPT})")
         self.statusBar().addPermanentWidget(self.lbl_signer)
         b_recheck = QPushButton("Kiểm tra lại")
         b_recheck.setObjectName("ghost")
@@ -741,7 +751,7 @@ class MainWindow(QMainWindow):
                 "Kiểm tra cục bộ: đọc cookie trong file, không gọi mạng.\n"
                 "  → bắt được tài khoản thiếu phiên / hết hạn ngày,\n"
                 "    nhưng KHÔNG biết tài khoản đã bị TikTok thu hồi phiên.\n\n"
-                "Kiểm tra đầy đủ: cần signer.bat đang chạy."
+                f"Kiểm tra đầy đủ: cần {SIGNER_SCRIPT} đang chạy."
             )
             row = QMessageBox.StandardButton
             box.setStandardButtons(row.Yes | row.No | row.Cancel)
@@ -1231,8 +1241,9 @@ class MainWindow(QMainWindow):
             "signer",
             "CHƯA CÓ SIDECAR KÝ → mọi request TikTok sẽ thất bại.\n"
             "  Nguyên nhân : tiến trình Node ký chưa chạy.\n"
-            "  Cách sửa   : chạy signer.bat (1 lần), GIỮ cửa sổ đó mở,\n"
-            "               rồi bấm 'Kiểm tra lại' ở thanh dưới.\n"
+            f"  Cách sửa   : chạy {SIGNER_HOW} (1 lần),\n"
+            f"               GIỮ cửa sổ terminal đó mở,\n"
+            f"               rồi bấm 'Kiểm tra lại' ở thanh dưới.\n"
             f"  Chi tiết   : {self._short_err(err)}",
             "err",
         )
@@ -1403,9 +1414,10 @@ class MainWindow(QMainWindow):
             )
             box.setInformativeText(
                 "Cách sửa:\n"
-                "  1. Chạy signer.bat trong thư mục dự án (1 lần).\n"
+                f"  1. Mở terminal trong thư mục dự án, chạy:\n"
+                f"       {SIGNER_HOW}\n"
                 "     Nó sẽ tải tiktok-signature + Chromium, cần Internet.\n"
-                "  2. GIỬ cửa sổ đó mở — đó là tiến trình ký.\n"
+                "  2. GIỮ cửa sổ terminal đó mở — đó là tiến trình ký.\n"
                 "  3. Quay lại đây, bấm nút 'Kiểm tra lại' ở thanh dưới.\n\n"
                 "Muốn chỉ xem thao tác chạy thì chọn Backend = mock."
             )

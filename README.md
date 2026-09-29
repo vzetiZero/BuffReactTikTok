@@ -9,12 +9,26 @@ Tài liệu đầy đủ về logic và trạng thái: **[docs/QUY-TRINH.md](doc
 
 ## Cài đặt
 
-```bash
-pip install -r requirements.txt
-python main.py
+**Windows**
+
+```bat
+install.bat
+start.bat
 ```
 
+**macOS / Linux**
+
+```bash
+chmod +x install.sh start.sh signer.sh
+./install.sh
+./start.sh
+```
+
+Cài tay cũng được: `pip install -r requirements.txt` rồi `python main.py`.
+
 Chạy thử giao diện mà chưa cần mạng: đặt **Backend = `mock`**, rồi bấm **Thử 1 tài khoản**.
+
+> Cần **Python 3.9+** và **Node.js 18+** (Node chỉ dùng cho sidecar ký).
 
 ---
 
@@ -26,36 +40,83 @@ Chạy thử giao diện mà chưa cần mạng: đặt **Backend = `mock`**, r�
    user_id | username | email | password | msToken | device_id | email2 | cookie_string
    ```
 
+   Lần sau mở app sẽ **tự nạp lại**, không phải chọn file nữa.
+
 2. Tick những tài khoản muốn dùng (mặc định tick tự động những cái còn phiên).
-3. Chọn **chế độ** ở cột bên phải:
 
-| Chế độ | Việc làm | Số request / account |
-|---|---|---|
-| **Thả tim theo CID** *(mặc định)* | `POST /api/comment/digg/?cid=…&digg_type=1` | 2–4 |
-| Tìm reply theo từ khoá rồi thả tim | Quét comment + reply, lọc text, thả tim | 5–50 |
-| Trả lời bình luận theo CID | `POST /api/comment/item/comment/publish/` | 2–3 |
-| Chỉ kiểm tra đăng nhập | `GET /api/user/detail/` | 1 |
+3. Kiểm tra tài khoản còn sống không — **chuột phải vào bảng**:
 
-4. Dán **`cid`** (18–19 số, ví dụ `769047757775676167`) và **`aweme_id`** của bài viết.
-   Dán URL bài viết cũng được — `aweme_id` sẽ tự điền.
+   | Mục menu | Tác dụng |
+   |---|---|
+   | Kiểm tra trạng thái: `<username>` | kiểm tra 1 tài khoản |
+   | Kiểm tra *n* dòng chọn / cả trang / tất cả đã tick | kiểm tra nhóm |
+   | **Dọn nhanh** | chỉ đọc cookie, **không gọi mạng**, không cần sidecar |
+   | **Bỏ tick những tài khoản đã die** | bỏ tick hàng loạt tài khoản hỏng |
+
+   Kết quả hiện ở **cột C · Status**: `● Sống` / `✖ Die` / `⌛ Hết hạn` / `? Không rõ`.
+   Màu `? Không rõ` = bị TikTok chặn IP, **không phải** cookie chết — cần proxy để
+   kiểm tra chính xác. Lọc nhanh bằng combo **“Status: còn sống”** / **“Status: đã die”**.
+
+4. Dán danh sách **`cid`** vào ô **Danh sách cid** — mỗi dòng một id
+   (cũng nhận phân tách bằng dấu phẩy):
+
+   ```
+   7690897576899658504
+   7654223771003994898
+   ```
+
+   Bấm **▶ CHẠY**: chạy hết đàn tài khoản cho cid đầu tiên, rồi **tự chuyển sang
+   cid kế tiếp** — log kiểu `▶ cid 2/5: …`. Bấm **■ DỪNG** giữa chừng sẽ xoá
+   luôn các cid còn lại trong hàng đợi.
+
+   Không cần `aweme_id` — endpoint `/api/comment/digg/` chỉ cần `cid`.
+
 5. Đặt **Số luồng**, rồi bấm **▶ CHẠY**.
 
-Bảng gồm 2 cột: **A** = thông tin tài khoản, **B** = trạng thái + kết quả cụ thể
-(ví dụ `♥ cid=… · like 244 → 245`).
+Bảng gồm 3 cột: **A** = thông tin tài khoản, **B** = kết quả lần chạy vừa rồi
+(ví dụ `♥ cid=… · like 244 → 245`), **C** = sức khoẻ tài khoản.
+
+---
+
+## 💡 Bao nhiêu luồng?
+
+Nút **Số luồng** = số request TikTok chạy song song. Tăng dần tới khi đồng hồ tốc
+độ **không tăng thêm nữa** — đó là chỗ trần thật của bạn.
+
+| Máy | Gợi ý |
+|---|---|
+| 4 nhân | 15–20 |
+| 8 nhân | 30–40 |
+| 10–12 nhân | 40–60 |
+| **M3 Pro 14" (12 nhân)** | **40–50**, thử 60 nếu đồng hồ vẫn tăng |
+
+Nhưng lưu ý: **trần thường không nằm ở máy**. Phần Python phân phối được
+~5.800 acc/s nên không phải nút thắt. Nút thắt là **sidecar ký** (~12 chữ ký/giây)
+và **giới hạn tần suất của TikTok theo IP**. Tăng luồng từ 20 lên 50 thường
+**không nhanh thêm** — chỉ làm hàng đợi dài ra. Xem dải màu cam trong ô đồng hồ để
+biết sidecar có đang nghẽn không.
+
+Vì vậy: **càng nhiều tài khoản, càng cần proxy xoay IP** (tab Cài đặt). Không có
+proxy, TikTok sẽ khóa IP sau khoảng vài chục request.
 
 ---
 
 ## ⚠️ Cần sidecar ký request
 
 TikTok bắt buộc mọi request API có chữ ký `X-Bogus` / `X-Gnarly`. App này **không tự
-reverse-engineer** mà gọi một tiến trình Node dùng SDK thật:
+reverse-engineer** mà gọi một tiến trình Node dùng SDK thật, chạy cục bộ ở
+`http://127.0.0.1:8080`:
 
 ```bash
 git clone https://github.com/carcabot/tiktok-signature.git
 cd tiktok-signature
 npm install
-npx puppeteer browsers install chromium
+npx puppeteer browsers install chrome
 npm start
+```
+
+Hoặc chạy `signer.bat` (Windows) / `./signer.sh` (macOS, Linux) — script tự làm hết
+các bước trên. **Phải giữ cửa sổ terminal đó mở.**
 ```
 
 App sẽ tự báo trạng thái sidecar ở thanh dưới cùng. Nếu hiện `KHÔNG kết nối`, hãy chạy
