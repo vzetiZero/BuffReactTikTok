@@ -22,6 +22,7 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
 
 from .backends.base import StopFlag
 from .config import RunConfig
+from .inflight import REST, TASK, tracker
 from .models import ST_FAIL, ST_RUNNING, ST_SKIP, Account, TaskResult
 from .proxy import IP_BLOCK_CODES
 
@@ -60,9 +61,13 @@ class AccountTask(QRunnable):
 
     @Slot()
     def run(self) -> None:
+        # `task` = một tài khoản đang được xử lý. Đồng hồ "đang chờ" của GUI
+        # đếm số này để thấy app còn sống ngay cả khi mọi luồng cùng kẹt.
+        tok = tracker.enter(TASK)
         try:
             self._run()
         finally:
+            tracker.leave(tok)
             # Báo "task đã trả về" ngay trên thread này. Nhờ vậy controller
             # không phải đoán bằng activeThreadCount() — thời điểm đó đã về 0
             # trước lúc signal của task cuối được giao tới GUI thread.
@@ -91,7 +96,12 @@ class AccountTask(QRunnable):
                             acc.id, f"Đổi proxy: {acc.proxy_label}", "warn"
                         )
                 self.sig.log.emit(acc.id, f"thử lại {attempt}/{attempts}, nghỉ 3s...")
-                if self.stop.wait(3):
+                tok = tracker.enter(REST)
+                try:
+                    stopped = self.stop.wait(3)
+                finally:
+                    tracker.leave(tok)
+                if stopped:
                     break
             result = self.backend.run(
                 acc, self.cfg, StopFlag(self.stop), self._progress

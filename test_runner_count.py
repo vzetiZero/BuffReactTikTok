@@ -20,6 +20,12 @@ TERMINAL = ("Chờ", "Đang chạy")     # trạng thái chưa kết thúc
 plan = [(1, 12), (2, 16), (5, 20), (10, 24), (20, 30)]
 idx = {"i": 0}
 rows: list = []
+# PHẢI giữ tham chiếu tới RunController đang chạy.
+# `ctrl` trong run_batch() chỉ còn tham chiếu qua closure của QTimer.singleShot
+# — sau khi timer bắn xong closure bị giải phóng, PySide6 hủy luôn QObject,
+# kéo theo QThreadPool đang chạy -> test treo hoặc crash 0xC0000005.
+# (Trong app thì không bị: MainWindow giữ self.controller suốt đời.)
+LIVE: list = []
 
 
 def mk(i):
@@ -35,6 +41,7 @@ def run_batch():
     threads, n = plan[idx["i"]]
     accs = [mk(i) for i in range(n)]
     ctrl = RunController(lambda: MockBackend(fail_rate=0.0, scale=0.94))
+    LIVE.append(ctrl)                 # xem chú thích của LIVE ở trên
     st = {"t0": 0.0}
     cnt = {"done": 0, "status": 0}
 

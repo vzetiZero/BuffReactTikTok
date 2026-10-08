@@ -54,6 +54,7 @@ from core.config import (
 )
 from core.gui_bridge import init_bridge
 from core.health import HealthChecker
+from core.inflight import HTTP, REST, SIGN, TASK, tracker
 from core.models import (
     HC_ALIVE,
     HC_CHECKING,
@@ -205,6 +206,15 @@ class MainWindow(QMainWindow):
         self._meter_timer.start()
         self._signer_ticks = 0
 
+        # 4 lần/giây: đồng hồ "đang chờ" + thanh tiến độ liên mạch.
+        # Tốc độ này đủ mượt để không bao giờ có cảm giác "đứng hẳn",
+        # nhưng cũng đủ thưa để không tốn CPU khi chỉ cập nhật chuỗi y hệt.
+        self._wait_text = ""
+        self._wait_timer = QTimer(self)
+        self._wait_timer.setInterval(250)
+        self._wait_timer.timeout.connect(self._tick_wait)
+        self._wait_timer.start()
+
         # Khôi phục danh sách cid của phiên làm việc trước
         if self.settings.cid_list:
             self.in_cid.setPlainText(self.settings.cid_list)
@@ -276,6 +286,22 @@ class MainWindow(QMainWindow):
 
         self.lbl_info = QLabel("Chưa có dữ liệu")
         self.statusBar().addWidget(self.lbl_info, 1)
+        # Đồng hồ "đang chờ" — cập nhật 4 lần/giây, luôn nói cho biết app
+        # đang chờ cái gì. Không có nó thì mỗi lần luồng kẹt, log im lặng
+        # và người dùng tưởng chương trình đã chết.
+        self.lbl_wait = QLabel("")
+        self.lbl_wait.setProperty("role", "hint")
+        self.lbl_wait.setToolTip(
+            "Đồng hồ 'đang chờ' (cập nhật 4 lần/giây):\n"
+            "• N việc: số tài khoản đang được xử lý\n"
+            "• chờ ký N: request đang đợi sidecar ký — nút thắt tầng 3\n"
+            "• chờ TikTok N: request đang đợi TikTok trả lời — nút thắt mạng/IP\n"
+            "• nghỉ N: luồng đang chờ thử lại hoặc trễ ngẫu nhiên\n"
+            "• lâu nhất Ns: request cũ nhất đã chờ N giây\n"
+            "  (≥5s là cam, ≥15s là đỏ — sắp chạm timeout 20-25s)"
+        )
+        self.lbl_wait.setVisible(False)
+        self.statusBar().addPermanentWidget(self.lbl_wait)
         self.lbl_signer = QLabel("sidecar: ?")
         self.lbl_signer.setToolTip(
             f"Tiến trình ký request TikTok (chạy bằng {SIGNER_SCRIPT})")
@@ -2021,14 +2047,15 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     @Slot(str)
     def _on_task_done(self, acc_id: str) -> None:
-        """Một task đã trả về. Dùng cho thanh tiến độ và đồng hồ."""
+        """Một task đã trả về. Dùng cho đồng hồ tốc độ + tiến độ liên mạch."""
         acc = self.model.by_id(acc_id)
         ok = bool(acc) and acc.status in (ST_OK, ST_DONE)
         self.meter.add_done(ok)
-        # thanh tiến độ = số đã xong / tổng — chạy đều, không nhảy vỡ
-        total = self.meter._total or 1
-        self.pbar.setValue(int(self.meter._done * 100 / total))
-        self.lbl_stat.setText(f"{self.meter._done}/{self.meter._total}")
+        # Task xong thì không còn "đang xử lý" nữa. `_progress` chỉ giữ các
+        # task CHƯA xong, nhờ vậy thanh tiến độ gộp được % của task đang chạy
+        # và không bao giờ đếm trùng. Nhãn số để đồng hồ 250ms lo — hai chỗ
+        # cùng ghi thì chữ sẽ giật qua lại giữa hai dạng.
+        self._progress.pop(acc_id, None)
 
     @Slot()
     def _on_meter_tick(self) -> None:
@@ -2036,6 +2063,77 @@ class MainWindow(QMainWindow):
         self._signer_ticks += 1
         if self._signer_ticks % 5 == 0:
             self._poll_signer_health()
+
+    # ------------------------------------------------------------------ #
+    # Đồng hồ "đang chờ" — 4 lần/giây, chạy suốt từ lúc bấm CHẠY
+    # ------------------------------------------------------------------ #
+    def _tick_wait(self) -> None:
+        """Cập nhật nhãn trạng thái + thanh tiến độ.
+
+        Đây là chỗ làm cho việc chạy 1..750 "liên mạch": kể cả khi 80 luồng
+        cùng kẹt network, mỗi 250ms vẫn có con số mới (số việc đang treo,
+        đang chờ ký hay chờ TikTok, bao lâu) — người dùng thấy app đang CHỜ,
+        chứ không phải app ĐÃ CHẾT.
+        """
+        snap = tracker.snapshot()
+        n_task = snap.get(TASK, (0, 0.0))[0]
+        n_sign, age_sign = snap.get(SIGN, (0, 0.0))
+        n_http, age_http = snap.get(HTTP, (0, 0.0))
+        n_rest, age_rest = snap.get(REST, (0, 0.0))
+        oldest = max(age_sign, age_http, age_rest)
+
+        parts: list[str] = []
+        if n_task:
+            parts.append(f"{n_task} việc")
+        if n_sign:
+            parts.append(f"chờ ký {n_sign}")
+        if n_http:
+            parts.append(f"chờ TikTok {n_http}")
+        if n_rest:
+            parts.append(f"nghỉ {n_rest}")
+        if parts and oldest >= 1.0:
+            parts.append(f"lâu nhất {oldest:.0f}s")
+        text = " · ".join(parts)
+
+        if text != self._wait_text:
+            self._wait_text = text
+            self.lbl_wait.setText(text)
+            self.lbl_wait.setVisible(bool(text))
+
+        role = ("err" if oldest >= 15 else "warn" if oldest >= 5 else "hint")
+        if self.lbl_wait.property("role") != role:
+            self.lbl_wait.setProperty("role", role)
+            self.lbl_wait.style().unpolish(self.lbl_wait)
+            self.lbl_wait.style().polish(self.lbl_wait)
+
+        # Số đếm cũng phải LIÊN MẠCH: vừa xong bao nhiêu, vừa có bao nhiêu
+        # việc đang xử lý — để từ 1 → 750 lúc nào cũng thấy có chuyển động.
+        # Chỉ setText khi chữ THẬT SỰ đổi, tránh 4 lần/giây bắt widget vẽ lại
+        # vô ích khi con số không đổi.
+        if self.controller.busy and self.meter._total:
+            txt = (f"{self.meter._done}/{self.meter._total}"
+                   + (f" · {n_task} đang xử lý" if n_task else ""))
+            if self.lbl_stat.text() != txt:
+                self.lbl_stat.setText(txt)
+
+        self._tick_pbar()
+
+    def _tick_pbar(self) -> None:
+        """Thanh tiến độ LIÊN MẠCH: đã xong + % của những task đang chạy.
+
+        Trước đây thanh chỉ nhảy khi có task xong (lại còn 2 chỗ ghi tranh
+        nhau), nên lúc mọi luồng cùng chờ network thì thanh đứng im — đúng
+        cảm giác "chết hẳn". Giờ một chỗ duy nhất ghi, cộng cả % dở dang,
+        nên thanh trôi liên tục trong lúc chờ.
+        """
+        if not self.controller.busy:
+            return
+        total = self.meter._total
+        if not total:
+            return
+        partial = sum(self._progress.values()) / 100.0
+        value = int((self.meter._done + partial) * 100 / total)
+        self.pbar.setValue(max(0, min(100, value)))
 
     def _poll_signer_health(self) -> None:
         """Hỏi sidecar ở thread nền — hàng đợi cho biết nút thắt ở đâu."""
@@ -2103,9 +2201,10 @@ class MainWindow(QMainWindow):
 
     @Slot(str, int)
     def _on_progress(self, acc_id: str, pct: int) -> None:
+        # Chỉ GHI %, không vẽ — việc vẽ để đồng hồ 250ms lo. Trước đây hai
+        # chỗ cùng ghi thanh tiến độ (nơi theo "xong/tổng", nơi theo "trung
+        # bình %") nên thanh nhảy ngược nhau.
         self._progress[acc_id] = pct
-        total = len(self._progress) or 1
-        self.pbar.setValue(sum(self._progress.values()) // total)
 
     @Slot(str, str)
     def _on_log(self, acc_id: str, message: str) -> None:

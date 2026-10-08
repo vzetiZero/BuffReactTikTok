@@ -21,6 +21,7 @@ from typing import Any
 
 from curl_cffi import requests as cf
 
+from .inflight import HTTP, REST, SIGN, tracker
 from .models import Account
 from .signer import Signer, SignerError
 
@@ -383,7 +384,13 @@ class TikTokClient:
         last: Exception | None = None
         for attempt in range(retries + 1):
             try:
-                signed = self.signer.sign(raw_url)
+                # hai bước này là hai nút thắt khác nhau, tách riêng để
+                # đồng hồ "đang chờ" nói đúng: chờ KÝ hay chờ TIKTOK.
+                tok = tracker.enter(SIGN)
+                try:
+                    signed = self.signer.sign(raw_url)
+                finally:
+                    tracker.leave(tok)
                 url = signed["signed_url"]
                 # PHẢI đồng bộ fingerprint TRƯỚC khi gửi: chữ ký vừa được
                 # tạo bằng User-Agent của chính sidecar, nên request cũng phải
@@ -393,10 +400,14 @@ class TikTokClient:
                 if data is not None:
                     headers["Content-Type"] = "application/json"
 
-                resp = self.sess.request(
-                    method.upper(), url,
-                    data=data, headers=headers, timeout=self.timeout,
-                )
+                tok = tracker.enter(HTTP)
+                try:
+                    resp = self.sess.request(
+                        method.upper(), url,
+                        data=data, headers=headers, timeout=self.timeout,
+                    )
+                finally:
+                    tracker.leave(tok)
 
                 # sidecar có thể trả cookie/msToken mới -> đồng bộ lại
                 self._absorb(signed)
@@ -420,7 +431,13 @@ class TikTokClient:
                 if isinstance(e, SignerError):
                     break  # sidecar hỏng thì thử lại cũng vô ích
                 if attempt < retries:
-                    time.sleep(0.6 * (attempt + 1) + random.random() * 0.3)
+                    # nghỉ trước khi thử lại — cũng phải báo lên đồng hồ,
+                    # nếu không người dùng thấy "đứng im" mà không biết vì sao
+                    tok = tracker.enter(REST)
+                    try:
+                        time.sleep(0.6 * (attempt + 1) + random.random() * 0.3)
+                    finally:
+                        tracker.leave(tok)
         raise last or TikTokError("thất bại không rõ lý do")
 
     def _absorb(self, signed: dict) -> None:

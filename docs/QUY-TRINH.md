@@ -211,6 +211,37 @@ theo trang hay bộ lọc đang xem — tránh tình trạng lọc rồi tưởn
 Số thứ tự tính trên `_view` (tập đang lọc), nên liên tục qua các trang và khớp
 với những gì mắt thấy. Khi không lọc thì trùng với thứ tự gốc trong file cookie.
 
+### 3.5. Lúc nào biết app đang CHỜ, chứ không phải ĐÃ CHẾT
+
+Chạy 750 tài khoản với 80 luồng sẽ có những quãng mọi luồng cùng đứng yên
+(một bên chờ sidecar ký, một bên chờ TikTok trả lời). Nếu nhật ký im lặng
+thì người dùng tưởng app treo và bấm DỪNG / đóng giữa chừng — trong khi
+request vẫn đang sống. Vì vậy có một **đồng hồ "đang chờ"** ở thanh trạng
+thái, chạy suốt 4 lần/giây:
+
+```
+38 việc · chờ TikTok 31 · chờ ký 7 · lâu nhất 6s
+```
+
+| Thành phần | Chỗ `enter` | Đọc là gì |
+|---|---|---|
+| `N việc` | `AccountTask.run()` bao quanh cả task | số tài khoản đang xử lý |
+| `chờ ký N` | `TikTokClient._request()` bao `signer.sign()` | kẹt ở **tầng 3 sidecar** |
+| `chờ TikTok N` | `_request()` bao `sess.request()` | kẹt ở **mạng / IP** |
+| `nghỉ N` | `runner` (3s giữa lần thử) + `http_backend` (trễ ngẫu nhiên) | đang nghỉ **có chủ đích** |
+| `lâu nhất Ns` | request cũ nhất trong các nhóm trên | ≥5s màu cam, ≥15s màu đỏ (sắp chạm timeout 20–25s) |
+
+Đọc nhanh để xử lý đúng chỗ: **`chờ ký` cao** → sidecar là nút thắt (chạy
+thêm 2–3 sidecar ở các cổng khác). **`chờ TikTok` cao** → IP bị giữ
+(giảm luồng, bật proxy per-account). **`nghỉ` cao** → ô *Trễ ngẫu nhiên*
+đang đặt to.
+
+Kèm theo, số đếm `N/M` và thanh tiến độ cũng được cập nhật mỗi 250ms và
+**cộng cả % dở dang của task đang sống**, nên từ 1 → 750 luôn có chuyển
+động thay vì nhảy từng đợt rồi đứng im. Bộ đếm nằm ở `core/inflight.py`
+(`tracker.enter(kind)` / `leave(token)` ở worker, `tracker.snapshot()` ở
+GUI) — hai lần lock mỗi request, không đáng kể so với network.
+
 ---
 
 ## 4. Trạng thái triển khai
@@ -247,6 +278,9 @@ với những gì mắt thấy. Khi không lọc thì trùng với thứ tự g�
 | 24 | Proxy hệ thống | `core/proxy.py` | WinINET / scutil / gsettings / biến môi trường |
 | 25 | Test tìm kiếm | `test_search.py` | 37/37 PASS, 5000 dòng: lọc 9ms |
 | 26 | Test phân trang | `test_paging.py` | 23/23 PASS |
+| 27 | **Đồng hồ "đang chờ"** | `core/inflight.py` | Đếm request đang treo theo 4 loại: task / chờ ký / chờ TikTok / nghỉ. Worker `enter`-`leave` ở mọi điểm chặn, GUI `snapshot()` 4 lần/giây |
+| 28 | **Bộ đếm + thanh tiến độ liên mạch** | `ui/main_window.py` | Nhãn `N/M · K đang xử lý` cập nhật 250ms; thanh gộp cả % dở dang của task sống; bỏ cảnh 2 chỗ ghi tranh thanh tiến độ |
+| 29 | Test đồng hồ đang chờ | `test_inflight.py` | 30/30 PASS (unit + đường request thật + GUI offscreen) |
 
 ### 4.2. ĐANG LÀM 🔄
 

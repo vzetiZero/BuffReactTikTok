@@ -17,6 +17,7 @@ from ..config import (
     MODE_REPLY_CID,
     RunConfig,
 )
+from ..inflight import REST, tracker
 from ..models import ST_DONE, ST_FAIL, ST_OK, Account, TaskResult
 from ..parser import extract_aweme_id
 from ..proxy import IP_BLOCK_CODES
@@ -80,10 +81,17 @@ class HttpBackend:
 
             if stop.is_set():
                 return TaskResult(ST_FAIL, "đã dừng")
-            if cfg.delay_max > 0 and stop.wait(
-                random.uniform(cfg.delay_min, cfg.delay_max)
-            ):
-                return TaskResult(ST_FAIL, "đã dừng")
+            if cfg.delay_max > 0:
+                # Trễ ngẫu nhiên là NGHỈ CÓ CHỦ ĐÍCH — cũng phải hiện lên
+                # đồng hồ, nếu không người dùng thấy đứng im mà không hiểu vì sao.
+                tok = tracker.enter(REST)
+                try:
+                    stopped = stop.wait(random.uniform(cfg.delay_min,
+                                                        cfg.delay_max))
+                finally:
+                    tracker.leave(tok)
+                if stopped:
+                    return TaskResult(ST_FAIL, "đã dừng")
 
             # --- 2. chạy tác vụ --------------------------------------- #
             if cfg.mode == MODE_LIKE_CID:

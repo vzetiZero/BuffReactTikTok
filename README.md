@@ -377,6 +377,7 @@ core/
   proxy.py                 parse / phân phối / xoay vòng / kiểm tra proxy / proxy hệ thống
   settings.py              lưu cấu hình JSON
   gui_bridge.py            đưa callback từ thread nền về GUI thread
+  inflight.py              đếm request đang treo → nguồn cho đồng hồ "đang chờ"
   backends/
     base.py                interface + Progress/StopFlag
     http_backend.py        tác vụ thật
@@ -388,6 +389,7 @@ ui/
   delegates.py             vẽ 2 cột + ô tick
   style.py                 style chung (màu, bảng, nút)
 smoke_test.py              test đa luồng không cần GUI
+test_inflight.py           test đồng hồ "đang chờ" + bộ đếm liên mạch (30 kiểm tra)
 test_search.py             test tìm kiếm/lọc/sắp xếp/phân trang (37 kiểm tra)
 test_paging.py             test phân trang (23 kiểm tra)
 test_proxy.py              test lớp proxy (25 kiểm tra)
