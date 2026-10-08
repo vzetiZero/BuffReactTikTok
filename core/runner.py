@@ -76,6 +76,12 @@ class AccountTask(QRunnable):
 
     def _run(self) -> None:
         acc = self.account
+        # Per-run result fields must not leak from a previous attempt. In
+        # particular, an earlier mock run may have populated like_after;
+        # the HTTP backend often has no verified count when aweme_id is not
+        # supplied, and that must display as OK instead of a stale number.
+        acc.like_after = None
+        acc.comment_id = ""
         self.sig.status.emit(acc.id, ST_RUNNING, "")
 
         if self.stop.is_set():
@@ -187,6 +193,9 @@ class RunController(QObject):
 
         self.started.emit(len(accounts))
         self._timer.start()
+        # Submit all accounts to QThreadPool. It keeps at most `concurrency`
+        # tasks active and starts the next queued task as soon as any worker
+        # returns; there are no fixed batches to wait for.
         for acc in accounts:
             self._pool.start(AccountTask(
                 acc, cfg, backend, self._sig, self._stop,

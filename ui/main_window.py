@@ -206,12 +206,12 @@ class MainWindow(QMainWindow):
         self._meter_timer.start()
         self._signer_ticks = 0
 
-        # 4 lần/giây: đồng hồ "đang chờ" + thanh tiến độ liên mạch.
+        # 10 lần/giây: đồng hồ "đang chờ" + thanh tiến độ liên mạch.
         # Tốc độ này đủ mượt để không bao giờ có cảm giác "đứng hẳn",
         # nhưng cũng đủ thưa để không tốn CPU khi chỉ cập nhật chuỗi y hệt.
         self._wait_text = ""
         self._wait_timer = QTimer(self)
-        self._wait_timer.setInterval(250)
+        self._wait_timer.setInterval(100)
         self._wait_timer.timeout.connect(self._tick_wait)
         self._wait_timer.start()
 
@@ -286,13 +286,13 @@ class MainWindow(QMainWindow):
 
         self.lbl_info = QLabel("Chưa có dữ liệu")
         self.statusBar().addWidget(self.lbl_info, 1)
-        # Đồng hồ "đang chờ" — cập nhật 4 lần/giây, luôn nói cho biết app
+        # Đồng hồ "đang chờ" — cập nhật 10 lần/giây, luôn nói cho biết app
         # đang chờ cái gì. Không có nó thì mỗi lần luồng kẹt, log im lặng
         # và người dùng tưởng chương trình đã chết.
         self.lbl_wait = QLabel("")
         self.lbl_wait.setProperty("role", "hint")
         self.lbl_wait.setToolTip(
-            "Đồng hồ 'đang chờ' (cập nhật 4 lần/giây):\n"
+            "Đồng hồ 'đang chờ' (cập nhật 10 lần/giây):\n"
             "• N việc: số tài khoản đang được xử lý\n"
             "• chờ ký N: request đang đợi sidecar ký — nút thắt tầng 3\n"
             "• chờ TikTok N: request đang đợi TikTok trả lời — nút thắt mạng/IP\n"
@@ -2065,13 +2065,13 @@ class MainWindow(QMainWindow):
             self._poll_signer_health()
 
     # ------------------------------------------------------------------ #
-    # Đồng hồ "đang chờ" — 4 lần/giây, chạy suốt từ lúc bấm CHẠY
+    # Đồng hồ "đang chờ" — 10 lần/giây, chạy suốt từ lúc bấm CHẠY
     # ------------------------------------------------------------------ #
     def _tick_wait(self) -> None:
         """Cập nhật nhãn trạng thái + thanh tiến độ.
 
         Đây là chỗ làm cho việc chạy 1..750 "liên mạch": kể cả khi 80 luồng
-        cùng kẹt network, mỗi 250ms vẫn có con số mới (số việc đang treo,
+        cùng kẹt network, mỗi 100ms vẫn có con số mới (số việc đang treo,
         đang chờ ký hay chờ TikTok, bao lâu) — người dùng thấy app đang CHỜ,
         chứ không phải app ĐÃ CHẾT.
         """
@@ -2092,7 +2092,7 @@ class MainWindow(QMainWindow):
         if n_rest:
             parts.append(f"nghỉ {n_rest}")
         if parts and oldest >= 1.0:
-            parts.append(f"lâu nhất {oldest:.0f}s")
+            parts.append(f"lâu nhất {oldest:.1f}s")
         text = " · ".join(parts)
 
         if text != self._wait_text:
@@ -2108,11 +2108,13 @@ class MainWindow(QMainWindow):
 
         # Số đếm cũng phải LIÊN MẠCH: vừa xong bao nhiêu, vừa có bao nhiêu
         # việc đang xử lý — để từ 1 → 750 lúc nào cũng thấy có chuyển động.
-        # Chỉ setText khi chữ THẬT SỰ đổi, tránh 4 lần/giây bắt widget vẽ lại
+        # Chỉ setText khi chữ THẬT SỰ đổi, tránh 10 lần/giây bắt widget vẽ lại
         # vô ích khi con số không đổi.
         if self.controller.busy and self.meter._total:
+            waiting = max(0, self.meter._total - self.meter._done - n_task)
             txt = (f"{self.meter._done}/{self.meter._total}"
-                   + (f" · {n_task} đang xử lý" if n_task else ""))
+                   + (f" · {n_task} đang xử lý" if n_task else "")
+                   + (f" · {waiting} chờ lượt" if waiting else ""))
             if self.lbl_stat.text() != txt:
                 self.lbl_stat.setText(txt)
 
@@ -2273,7 +2275,9 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ #
     def _log(self, tag: str, message: str, level: str = "info") -> None:
-        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        # Millisecond precision makes bursty parallel activity visible;
+        # second-only timestamps made many fast events look simultaneous.
+        ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
         color = LEVEL_COLOR.get(level, LEVEL_COLOR["info"])
         self.log_edit.appendHtml(
             f'<span style="color:#9aa6b4">{ts}</span> '

@@ -195,7 +195,10 @@ trên mỗi máy.
 
    Không cần `aweme_id` — endpoint `/api/comment/digg/` chỉ cần `cid`.
 
-5. Đặt **Số luồng**, rồi bấm **▶ CHẠY**.
+5. Đặt **Số luồng**, rồi bấm **▶ CHẠY**. Backend mặc định là **http** để gửi
+   request thật. Các tài khoản được đưa vào hàng đợi chung; worker nào xong
+   trước sẽ nhận tài khoản kế tiếp ngay, không phải chờ đủ cả nhóm luồng.
+   Khi đang chạy, bộ đếm hiển thị số đã xong, đang xử lý và còn chờ.
 
 Bảng gồm 3 cột: **A** = thông tin tài khoản, **B** = kết quả lần chạy vừa rồi
 (ví dụ `♥ cid=… · like 244 → 245`), **C** = sức khoẻ tài khoản.

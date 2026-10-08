@@ -139,6 +139,7 @@ class AppSettings:
     # --- đường dẫn ---
     last_cookie_file: str = ""
     backend_kind: str = "http"
+    backend_default_migrated: bool = True
     remember_accounts: bool = True   # nhớ tài khoản đã nạp, mở lại khỏi nạp
     per_page: int = 0                # 0 = không phân trang, hiện toàn bộ
     cid_list: str = ""               # danh sách cid đang làm việc (nhớ lại)
@@ -184,4 +185,17 @@ class AppSettings:
         except (OSError, ValueError):
             return cls()
         known = {f for f in cls.__dataclass_fields__}
-        return cls(**{k: v for k, v in raw.items() if k in known})
+        settings = cls(**{k: v for k, v in raw.items() if k in known})
+        # Older installs may have persisted `mock` after a UI-only run. Move
+        # that existing config to the real backend once; later manual changes
+        # to mock remain respected across restarts.
+        if ("backend_default_migrated" not in raw
+                or not settings.backend_default_migrated):
+            if settings.backend_kind == "mock":
+                settings.backend_kind = "http"
+            settings.backend_default_migrated = True
+            try:
+                settings.save(p)
+            except OSError:
+                pass
+        return settings
