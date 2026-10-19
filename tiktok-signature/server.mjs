@@ -45,8 +45,13 @@ puppeteer.use(StealthPlugin());
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 8080;
 
-// Custom user data directory to avoid filling /tmp
-const USER_DATA_DIR = path.join(__dirname, ".chrome-profile");
+// Custom user data directory to avoid filling /tmp.
+// CHROME_PROFILE_DIR cho phép chạy nhiều sidecar song song (mỗi cổng một
+// profile riêng) — cần khi mỗi proxy có một sidecar để IP ký khớp IP request.
+const USER_DATA_DIR = path.resolve(
+  __dirname,
+  process.env.CHROME_PROFILE_DIR || ".chrome-profile",
+);
 
 // User agent - Windows Chrome (khớp browser thật của đa số tài khoản)
 const DEFAULT_UA =
@@ -61,6 +66,7 @@ const PROXY_ENABLED =
 const PROXY_HOST = process.env.PROXY_HOST || "";
 const PROXY_USER = process.env.PROXY_USER || "";
 const PROXY_PASS = process.env.PROXY_PASS || "";
+const PROXY_SCHEME = process.env.PROXY_SCHEME || "http";
 
 // Local SDK path - the SDK is used to generate valid signatures
 const SDK_PATH = path.join(__dirname, "javascript", "webmssdk_5.1.3.js");
@@ -306,8 +312,8 @@ async function ensureBrowser() {
     ];
 
     if (PROXY_ENABLED) {
-      browserArgs.push(`--proxy-server=http://${PROXY_HOST}`);
-      console.log(`[Server] Proxy enabled: ${PROXY_HOST}`);
+      browserArgs.push(`--proxy-server=${PROXY_SCHEME}://${PROXY_HOST}`);
+      console.log(`[Server] Proxy enabled: ${PROXY_SCHEME}://${PROXY_HOST}`);
     } else {
       console.log("[Server] Proxy disabled - direct connection");
     }

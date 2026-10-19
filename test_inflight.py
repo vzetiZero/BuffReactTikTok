@@ -115,6 +115,10 @@ def test_gauges_on_gui() -> None:
     w.sp_threads.setValue(12)
     w.sp_dmin.setValue(0.0)
     w.sp_dmax.setValue(0.0)
+    # GUI nap tham so tu bo nho phien truoc; lan chay that co the da luu
+    # pick_limit (vd 50). Test nay muon chay HET 60 tai khoan nen phai ep
+    # ve "tat ca" (0), khong thi ket qua phu thuoc setting cua nguoi dung.
+    w.sp_pick.setValue(0)
     w.in_cid.setPlainText("7690897576899658504")
     for _ in range(3):
         app.processEvents()

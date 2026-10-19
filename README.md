@@ -199,7 +199,15 @@ mới để tải lại. `.venv/` cũng không nằm trong git — chạy `insta
    `aweme_id` không bắt buộc — endpoint `/api/comment/digg/` chỉ cần `cid`. Tuy
    nhiên nên dán thêm **Video URL** (ô tùy chọn ngay dưới danh sách cid): app sẽ
    gửi `aweme_id` và dùng chính URL đó làm `Referer`, giống request thật, đồng
-   thời bật được bước đọc lại số like.
+   thời bật được bước đọc lại `user_digged`/số like.
+
+   > **Xác minh tim thật (quan trọng).** `status_code=0` chỉ là TikTok *nhận
+   > lệnh*, không phải tim đã vào. App đọc lại comment và chỉ báo **Thành công**
+   > khi `user_digged=1` (kèm mức like tăng). Đo thực tế trên TikTok (10/2026):
+   > tim **comment gốc** dính ngay; tim **reply** bị TikTok bỏ qua lặng lẽ dù
+   > request hợp lệ — kể cả khi thả bằng Chrome thật có đủ `X-Dynosaur`,
+   > ticket-guard, `X-Bogus=1`. Khi đó app ghi **Lỗi · TikTok nhận lệnh nhưng
+   > KHÔNG ghi nhận tim** thay vì báo thành công ảo.
 
 5. Đặt **Số luồng**, rồi bấm **▶ CHẠY**. Backend mặc định là **http** để gửi
    request thật. Các tài khoản được đưa vào hàng đợi chung; worker nào xong
@@ -358,6 +366,21 @@ quan IP (`8`, `10202`, `10221`, `10222`, `350002`), app đổi sang proxy kế t
 — tối đa số lần bạn đặt ở *Thử lại*.
 
 Cấu hình (kể cả mật khẩu proxy) tự lưu khi đóng app.
+
+### Mỗi proxy một sidecar ký (quan trọng)
+
+Sidecar tạo `ttwid` / `msToken` từ IP của **trình duyệt nó đang chạy**. Nếu request
+thật lại thoát qua proxy, TikTok thấy chữ ký thuộc IP máy nhưng request đến từ IP
+proxy — và trả **HTTP 200 + body rỗng (code 8)** dù proxy vẫn sống. Đây là lý do
+"đã đổi proxy mà vẫn bị chặn IP".
+
+Từ bản này app tự mở **một sidecar riêng cho mỗi proxy** (tối đa 12 cái), cấu hình
+trình duyệt của sidecar đi đúng proxy đó. Nhờ vậy chữ ký và request cùng một IP.
+Lần chạy đầu sẽ chậm hơn ~15–30 giây mỗi proxy vì phải khởi động Chromium; các lần
+sau dùng lại. Account không gán proxy vẫn dùng sidecar mặc định cổng `8080` như cũ.
+
+Nếu proxy list có nhiều hơn 12 địa chỉ khác nhau, hãy chia lô nhỏ hơn — app báo rõ
+thay vì âm thầm dùng sai signer.
 
 ## Tốc độ
 

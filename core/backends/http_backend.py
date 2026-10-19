@@ -35,10 +35,15 @@ from .rate_limit import (
 class HttpBackend:
     name = "http"
 
-    def __init__(self, pool=None, rotate_on_block: bool = True) -> None:
+    def __init__(self, pool=None, rotate_on_block: bool = True,
+                 signer_pool=None) -> None:
         self.signer = Signer()
         self.pool = pool
         self.rotate_on_block = rotate_on_block
+        # Mỗi proxy cần một sidecar riêng để ttwid/msToken của chữ ký được
+        # tạo từ ĐÚNG IP mà request thoát ra. Không có proxy -> signer 8080
+        # (IP máy) như cũ.
+        self.signer_pool = signer_pool
         # Dùng chung cho mọi task trong MỘT lần chạy CID. Khi TikTok bắt
         # đầu trả body rỗng/rate limit, các task còn lại sẽ skip thay vì
         # gửi thêm hàng trăm request làm IP bị chặn lâu hơn.
@@ -58,7 +63,18 @@ class HttpBackend:
         try:
             # proxy riêng của account, không có thì dùng proxy chung
             proxy = "" if not cfg.use_proxy_pool else (account.proxy or cfg.proxy)
-            progress(aid, f"Kết nối{' qua proxy' if proxy else ' (IP máy)'}...", 5)
+            signer = self.signer
+            if proxy and self.signer_pool is not None:
+                label = getattr(account, "proxy_label", "") or "proxy"
+                progress(aid, f"Đang chuẩn bị signer cho {label}...", 8)
+                try:
+                    signer = self.signer_pool.signer_for(proxy)
+                except Exception as e:
+                    return TaskResult(
+                        ST_FAIL,
+                        f"Không dựng được sidecar cho proxy: {str(e)[:160]}",
+                    )
+            progress(aid, f"Kết nối{' qua proxy' if proxy else ' (IP máy)'}...", 12)
             # Request thật gửi Referer = URL video đang mở. Ưu tiên URL đầy
             # đủ trong cfg.video; nếu chỉ có aweme_id thì dựng URL chuẩn.
             video = (cfg.video or "").strip()
@@ -70,7 +86,7 @@ class HttpBackend:
             else:
                 referer = ""
             client = TikTokClient(
-                account, self.signer,
+                account, signer,
                 region=cfg.region, timezone=cfg.timezone,
                 proxy=proxy, timeout=cfg.timeout,
                 language=cfg.language or "en", referer=referer,
@@ -161,37 +177,20 @@ class HttpBackend:
             return TaskResult(ST_FAIL, "CID phải là chuỗi số 18-19 ký tự")
 
         aweme = cfg.aweme_id.strip() or extract_aweme_id(cfg.video)
+        verify = bool(cfg.verify and aweme)
         progress(aid, f"Thả tim cid={cid}...", 60)
 
-        before = self._digg_count(client, aweme, cid) if (cfg.verify and aweme) else None
+        before_item = self._find_item(client, aweme, cid) if verify else None
+        before_like = before_item.get("digg_count") if before_item else None
+
+        # user_digged=1: account đã thả tim từ trước — đích đã đạt, khỏi gọi API.
+        if before_item is not None and before_item.get("user_digged") == 1:
+            note = f"♥ cid={cid} · đã thả tim trước đó (user_digged=1)"
+            progress(aid, note, 100)
+            return TaskResult(ST_OK, note, comment_id=cid, found=True, ok=True)
 
         res = client.digg_comment(aweme, cid, digg=True)
         code = _code_of(res)
-
-        if code == 0:
-            self._guard.success()
-            note = f"♥ cid={cid}"
-            like_after: int | None = None
-            if cfg.verify and aweme:
-                after = self._digg_count(client, aweme, cid)
-                if before is not None and after is not None:
-                    if after > before:
-                        like_after = after
-                        note += f" · like {before} → {after}"
-                    elif after == before:
-                        # Code 0 chỉ là API nhận; count không tăng có thể do
-                        # TikTok trả chậm hoặc account đã tim rồi. Không in
-                        # "N TIM CMT" để tránh tưởng lần này vừa tăng like.
-                        note += f" · chưa thấy like tăng (like={after})"
-                    else:
-                        note += f" · ⚠ like giảm? (like={after})"
-                else:
-                    note += " · không đọc lại được số like"
-            else:
-                note += " · API trả status_code=0"
-            progress(aid, note, 100)
-            return TaskResult(ST_OK, note, comment_id=cid, found=True, ok=True,
-                              like_after=like_after)
 
         # 200034 = TikTok báo comment đã được account này thả tim rồi.
         # Đây là trạng thái đích đã đạt, không phải lỗi. Tuyệt đối không
@@ -199,15 +198,68 @@ class HttpBackend:
         if code == 200034:
             self._guard.success()
             note = f"♥ cid={cid} · đã thả tim trước đó"
-            if before is not None:
-                note += f" (like={before})"
+            if before_like is not None:
+                note += f" (like={before_like})"
             progress(aid, note, 100)
             return TaskResult(ST_OK, note, comment_id=cid, found=True, ok=True,
                               like_after=None)
 
-        return self._api_failure(
-            f"API từ chối: {explain(code, res.get('status_msg', ''))}", code
-        )
+        if code != 0:
+            return self._api_failure(
+                f"API từ chối: {explain(code, res.get('status_msg', ''))}", code
+            )
+
+        self._guard.success()
+
+        if not verify:
+            note = f"♥ cid={cid} · API nhận (code 0, chưa xác minh)"
+            progress(aid, note, 100)
+            return TaskResult(ST_OK, note, comment_id=cid, found=True, ok=True)
+
+        # status_code=0 chỉ là API NHẬN lệnh, KHÔNG phải bằng chứng tim đã
+        # vào. Đo thật trên TikTok: tim comment GỐC dính ngay
+        # (user_digged 0→1), còn tim REPLY bị bỏ qua lặng lẽ (user_digged
+        # vẫn 0, count không đổi). Vì vậy phải đọc lại user_digged mới
+        # được coi là thành công.
+        after_item = self._find_item(client, aweme, cid)
+        if after_item is None:
+            note = f"♥ cid={cid} · code 0 nhưng không đọc lại được để xác minh"
+            progress(aid, note, 100)
+            return TaskResult(ST_OK, note, comment_id=cid, found=True, ok=True,
+                              like_after=None)
+
+        dug = after_item.get("user_digged")
+        after_like = after_item.get("digg_count")
+
+        if dug == 1:
+            note = f"♥ cid={cid} · xác minh user_digged=1"
+            if before_like is not None and after_like is not None:
+                note += f" · like {before_like} → {after_like}"
+            progress(aid, note, 100)
+            return TaskResult(ST_OK, note, comment_id=cid, found=True, ok=True,
+                              like_after=after_like)
+
+        if dug in (0, False):
+            note = ("TikTok nhận lệnh (status_code=0) nhưng KHÔNG ghi nhận "
+                    "tim — user_digged vẫn 0")
+            if after_like is not None:
+                note += f", like vẫn {after_like}"
+            note += " · dạng comment này đang bị bỏ qua với tài khoản hiện tại"
+            progress(aid, note, 100)
+            return TaskResult(ST_FAIL, note, code=code, comment_id=cid)
+
+        # payload không kèm user_digged → đành đối chiếu digg_count
+        if (before_like is not None and after_like is not None
+                and after_like > before_like):
+            note = f"♥ cid={cid} · like {before_like} → {after_like}"
+            progress(aid, note, 100)
+            return TaskResult(ST_OK, note, comment_id=cid, found=True, ok=True,
+                              like_after=after_like)
+
+        note = (f"code 0 nhưng CHƯA xác minh được (user_digged vắng, "
+                f"like={after_like})")
+        progress(aid, note, 100)
+        return TaskResult(ST_FAIL, note, comment_id=cid)
 
     def _api_failure(self, note: str, code: int) -> TaskResult:
         """Trả lỗi API; tự chuyển thành phanh nếu chạm ngưỡng rate limit."""
@@ -216,14 +268,13 @@ class HttpBackend:
                               code=RATE_LIMIT_CODE)
         return TaskResult(ST_FAIL, note, code=code)
 
-    def _digg_count(self, client: TikTokClient, aweme: str, cid: str) -> int | None:
+    def _find_item(self, client: TikTokClient, aweme: str,
+                   cid: str) -> dict | None:
+        """Đọc lại đúng comment để xác minh (user_digged + digg_count)."""
         try:
-            item = client.find_comment(aweme, cid, max_pages=2)
+            return client.find_comment(aweme, cid, max_pages=2)
         except TikTokError:
             return None
-        if not item:
-            return None
-        return item.get("digg_count")
 
     # ------------------------------------------------------------------ #
     # Chế độ 2: trả lời 1 cid
@@ -266,24 +317,73 @@ class HttpBackend:
 
         cid = str(hit.get("cid"))
         likes = hit.get("digg_count", 0)
+
+        if hit.get("user_digged") == 1:
+            note = f"♥ cid={cid} · đã thả tim trước đó (user_digged=1)"
+            progress(aid, note, 100)
+            return TaskResult(ST_OK, note, comment_id=cid, found=True, ok=True)
+
         progress(aid, f"Tìm thấy cid={cid} ({likes} like) → thả tim", 70)
 
         res = client.digg_comment(aweme, cid, digg=True)
         code = _code_of(res)
-        if code == 0:
-            self._guard.success()
-            # Không in "likes + 1": đây chỉ là số đọc được TRƯỚC khi thả
-            # tim, chưa đọc lại nên không được tự bịa mức tăng.
-            note = f"♥ cid={cid} · đã thả tim (like trước: {likes})"
-            progress(aid, note, 100)
-            return TaskResult(ST_OK, note, comment_id=cid, found=True, ok=True,
-                              like_after=None)
+
         if code == 200034:
             self._guard.success()
             note = f"♥ cid={cid} · đã thả tim trước đó (like={likes})"
             progress(aid, note, 100)
             return TaskResult(ST_OK, note, comment_id=cid, found=True, ok=True,
                               like_after=None)
+
+        if code == 0:
+            self._guard.success()
+            if not cfg.verify:
+                note = (f"♥ cid={cid} · đã thả tim "
+                        f"(like trước: {likes}; chưa xác minh)")
+                progress(aid, note, 100)
+                return TaskResult(ST_OK, note, comment_id=cid, found=True, ok=True,
+                                  like_after=None)
+
+            # Đọc lại để biết TIM CÓ VÀO THẬT không (code 0 chỉ là nhận lệnh).
+            after_item = self._find_item(client, aweme, cid)
+            dug = after_item.get("user_digged") if after_item else None
+            after_like = after_item.get("digg_count") if after_item else None
+
+            if dug == 1:
+                note = f"♥ cid={cid} · xác minh user_digged=1"
+                if after_like is not None:
+                    note += f" · like {likes} → {after_like}"
+                progress(aid, note, 100)
+                return TaskResult(ST_OK, note, comment_id=cid, found=True,
+                                  ok=True, like_after=after_like)
+
+            if dug in (0, False):
+                note = ("TikTok nhận lệnh (status_code=0) nhưng KHÔNG ghi "
+                        "nhận tim — user_digged vẫn 0")
+                if after_like is not None:
+                    note += f", like vẫn {after_like}"
+                note += " · dạng comment này đang bị bỏ qua với tài khoản hiện tại"
+                progress(aid, note, 100)
+                return TaskResult(ST_FAIL, note, code=code, comment_id=cid)
+
+            if after_item is None:
+                note = (f"♥ cid={cid} · code 0 nhưng không đọc lại được "
+                        f"để xác minh")
+                progress(aid, note, 100)
+                return TaskResult(ST_OK, note, comment_id=cid, found=True,
+                                  ok=True, like_after=None)
+
+            if after_like is not None and after_like > likes:
+                note = f"♥ cid={cid} · like {likes} → {after_like}"
+                progress(aid, note, 100)
+                return TaskResult(ST_OK, note, comment_id=cid, found=True,
+                                  ok=True, like_after=after_like)
+
+            note = (f"code 0 nhưng CHƯA xác minh được (user_digged vắng, "
+                    f"like={after_like})")
+            progress(aid, note, 100)
+            return TaskResult(ST_FAIL, note, comment_id=cid)
+
         return self._api_failure(
             f"API từ chối (code {code}): "
             f"{explain(code, res.get('status_msg', ''))}",

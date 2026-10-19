@@ -75,6 +75,7 @@ from core.models import (
 )
 from core.parser import extract_aweme_id, load_accounts
 from core.proxy import GatewayConfig, ProxyPool
+from core.sidecar_pool import SidecarPool, find_node_exe
 from core.runner import RunController
 from core.settings import (
     AppSettings,
@@ -150,6 +151,31 @@ class MainWindow(QMainWindow):
         if self.settings.proxy_text:
             self.proxy_pool.load(self.settings.proxy_text)
 
+        # Sidecar theo từng proxy: chỉ khởi động khi thật sự có account
+        # chạy qua proxy. Không có Node thì để None, HttpBackend báo lỗi rõ.
+        self.signer_pool: SidecarPool | None = None
+        try:
+            repo = Path(__file__).resolve().parents[1]
+            sidecar_dir = repo / "tiktok-signature"
+            if not (sidecar_dir / "server.mjs").exists():
+                sidecar_dir = Path.cwd() / "tiktok-signature"
+            node_exe = find_node_exe()
+            if node_exe and (sidecar_dir / "server.mjs").exists():
+                self.signer_pool = SidecarPool(
+                    sidecar_dir, node_exe,
+                    default_signer_url=self.settings.signer_url,
+                )
+        except Exception:
+            self.signer_pool = None
+
+        # Sidecar proxy giữ nguyên trình duyệt Chromium (~0,5–1 GB/con cái).
+        # Sau khi hàng đợi chạy xong, chờ 3 phút rồi tắt hết để trả RAM;
+        # chạy tiếp trong lúc đó thì huỷ hẹn, không phải khởi động lại.
+        self._sidecar_idle_timer = QTimer(self)
+        self._sidecar_idle_timer.setSingleShot(True)
+        self._sidecar_idle_timer.setInterval(180_000)
+        self._sidecar_idle_timer.timeout.connect(self._stop_proxy_sidecars)
+
         self.model = AccountTableModel(self)
         # per_page = 0 = KHÔNG phân trang, hiện toàn bộ danh sách.
         # Trước đây chia 50 dòng 1 trang; với vài nghìn tài khoản thì
@@ -163,6 +189,7 @@ class MainWindow(QMainWindow):
                 self.backend_kind.currentData(),
                 proxy_pool=self.proxy_pool,
                 rotate_on_block=self.settings.rotate_on_block,
+                signer_pool=self.signer_pool,
             ),
             pool=self.proxy_pool,
             rotate_on_block=self.settings.rotate_on_block,
@@ -1425,6 +1452,8 @@ class MainWindow(QMainWindow):
 
     def _on_proxies_ready(self, count: int) -> None:
         """Proxy vừa gán lại -> cập nhật cột A để thấy account nào dùng proxy nào."""
+        if self.signer_pool is not None:
+            self.signer_pool.reset()
         self.model._refresh_page()
         self._refresh_pager()
         self._refresh_proxy_label()
@@ -1852,6 +1881,8 @@ class MainWindow(QMainWindow):
         """
         if self.controller.busy:
             return
+        if self.signer_pool is not None:
+            self._sidecar_idle_timer.stop()
         if mode:
             i = self.cb_mode.findData(mode)
             if i >= 0:
@@ -1984,6 +2015,8 @@ class MainWindow(QMainWindow):
             self._cid_queue = []
             return
 
+        if self.signer_pool is not None:
+            self._sidecar_idle_timer.stop()
         self._cid_pos += 1
         cid = self._cid_queue[self._cid_pos]
         accounts = self._run_accounts
@@ -2027,6 +2060,24 @@ class MainWindow(QMainWindow):
                 f"   đường ra: {n_own} qua proxy gán, {rest} qua {via}",
                 "head",
             )
+        if n_own and self.signer_pool is None:
+            self._log(
+                "head",
+                "⚠ Không dựng được sidecar riêng cho proxy (thiếu Node / "
+                "tiktok-signature). Request qua proxy dễ bị body rỗng "
+                "vì chữ ký vẫn dùng danh tính IP máy.",
+                "warn",
+            )
+        elif n_own and self.signer_pool is not None:
+            uniq = len({a.proxy for a in accounts if a.proxy})
+            if uniq > self.signer_pool.max_instances:
+                self._log(
+                    "head",
+                    f"⚠ {uniq} proxy khác nhau nhưng chỉ mở được tối đa "
+                    f"{self.signer_pool.max_instances} sidecar. Các account "
+                    "dùng proxy vượt giới hạn sẽ báo lỗi — chia lô nhỏ hơn.",
+                    "warn",
+                )
         self.controller.start(accounts, cfg)
 
     def on_stop(self) -> None:
@@ -2324,6 +2375,7 @@ class MainWindow(QMainWindow):
             self._queue_paused = False
             self._refresh_cid_label()
             self._set_running(False)
+            self._queue_sidecar_idle_stop()
             return
 
         # --- sang cid kế tiếp, trừ khi người dùng bấm DỪNG ---
@@ -2340,6 +2392,7 @@ class MainWindow(QMainWindow):
             self._queue_paused = False
             self._refresh_cid_label()
             self._set_running(False)
+            self._queue_sidecar_idle_stop()
             return
 
         if pos < total:
@@ -2354,6 +2407,27 @@ class MainWindow(QMainWindow):
         self._log_done_summary()
         self._refresh_cid_label()
         self._set_running(False)
+        self._queue_sidecar_idle_stop()
+
+    def _queue_sidecar_idle_stop(self) -> None:
+        """Hẹn tắt sidecar proxy sau khi rảnh (tránh giữ Chromium chiếm RAM)."""
+        if self.signer_pool is not None:
+            self._sidecar_idle_timer.start()
+
+    def _stop_proxy_sidecars(self) -> None:
+        """Tắt toàn bộ sidecar proxy đang rảnh để giải phóng RAM."""
+        if self.controller.busy or self.signer_pool is None:
+            return
+        n = self.signer_pool.count()
+        if n <= 0:
+            return
+        self.signer_pool.reset()
+        self._log(
+            "head",
+            f"Đã tắt {n} sidecar proxy sau khi rảnh để giải phóng RAM. "
+            "Lần chạy sau sẽ khởi động lại (khoảng 20 giây mỗi proxy).",
+            "info",
+        )
 
     def _log_done_summary(self) -> None:
         """In tóm tắt cuối cùng: mỗi CID đã chạy được bao nhiêu account."""
@@ -2410,6 +2484,9 @@ class MainWindow(QMainWindow):
         if self._signer_poll is not None:
             self._signer_poll.stop()
             self._signer_poll = None
+        if self.signer_pool is not None:
+            self.signer_pool.shutdown()
+            self.signer_pool = None
         self._kill_signer()
         event.accept()
 
