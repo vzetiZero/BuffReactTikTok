@@ -78,13 +78,25 @@ class RunLogModel(QAbstractTableModel):
         self.n_fail = 0
 
     # ------------------------------------------------------------------ #
-    def reset(self) -> None:
+    def reset(self, keep_done: bool = False) -> None:
+        """Xoá bảng log của lượt chạy hiện tại.
+
+        `keep_done=True` giữ danh sách CID đã xong khi chuyển sang CID kế
+        tiếp trong CÙNG một hàng đợi. Trước đây reset mặc định xoá luôn
+        done_cids, nên ô "CID đã hoàn thành" chỉ còn CID cuối.
+        """
         self.beginResetModel()
         self._rows.clear()
-        self.done_cids.clear()
+        if not keep_done:
+            self.done_cids.clear()
         self.n_ok = 0
         self.n_fail = 0
         self.endResetModel()
+
+    def mark_done(self, cid: str) -> None:
+        """Ghi nhận CID đã chạy xong, kể cả khi mọi account đều lỗi."""
+        if cid and cid not in self.done_cids:
+            self.done_cids.append(cid)
 
     def clear_done(self) -> None:
         self.done_cids.clear()
@@ -159,7 +171,13 @@ class RunLogModel(QAbstractTableModel):
         n = len(self._rows)
         if not n:
             return "Chưa chạy gì."
-        done = len(self.done_cids)
+        # Đếm số DÒNG đã có trạng thái cuối, không dùng len(done_cids):
+        # done_cids là số CID, còn n là số account — trộn hai đơn vị sẽ ra
+        # "xong 2/200" vô nghĩa.
+        done = sum(
+            1 for r in self._rows
+            if r.status in (ST_OK, ST_FAIL, ST_SKIP, ST_DONE)
+        )
         return (f"xong {done}/{n}  ·  thành công {self.n_ok}  ·  "
                 f"lỗi {self.n_fail}")
 

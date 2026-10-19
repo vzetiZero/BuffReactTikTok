@@ -2055,8 +2055,9 @@ class MainWindow(QMainWindow):
         dùng thấy "đang chạy cái gì" chứ không phải chờ tới khi có kết
         quả mới thấy dòng đầu tiên.
         """
-        self.runlog.reset()
-        self.in_done_cid.clear()
+        # CID đầu của lượt chạy mới -> xoá danh sách đã xong cũ.
+        # CID thứ 2, 3... -> giữ lại để ô "CID đã hoàn thành" có đủ.
+        self.runlog.reset(keep_done=self._cid_pos > 0)
         for a in accounts:
             self.runlog.add(a.id, cid=cid,
                              name=getattr(a, "username", "") or a.id)
@@ -2276,6 +2277,12 @@ class MainWindow(QMainWindow):
             + f"{self.meter._avg:.1f} acc/s)"
         )
         cid = self._cid_queue[self._cid_pos] if self._cid_queue else ""
+        # Một CID có thể xong mà không có account nào thành công (rate limit).
+        # Vẫn phải ghi vào ô "CID đã hoàn thành" — đây là CID đã chạy xong,
+        # không phải danh sách CID có like thành công.
+        if cid:
+            m.mark_done(cid)
+            self._refresh_run_stat()
         pos = self._cid_pos + 1
         total = len(self._cid_queue)
         self._log(

@@ -185,6 +185,15 @@ def _run(win, dialogs):
     check("cid cuoi cung la cid thu 3",
           all(last_cid in (a.note or "") for a in accounts), True)
 
+    # Cả 3 cid phải còn trong ô "CID đã hoàn thành", không chỉ cid cuối.
+    # Trước đây _log_run_start() reset cả done_cids nên cid 1 và 2 bị mất.
+    check("done_cids giữ đủ 3 cid", win.runlog.done_cids, CIDS)
+    check("ô CID đã hoàn thành có đủ 3 cid",
+          win.in_done_cid.toPlainText().splitlines(), CIDS)
+    log_text = win.log_edit.toPlainText()
+    check("log chính có cid đầu tiên", CIDS[0] in log_text, True)
+    check("log chính có dòng cid 1/3 xong", "cid 1/3" in log_text, True)
+
     # --- Test 2: danh sach rong -> phai chan, khong chay ---
     print("\n=== Danh sach rong ===")
     seen_order.clear()
