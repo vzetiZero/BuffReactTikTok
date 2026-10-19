@@ -180,6 +180,12 @@ def format_success_line(
     if "MÔ PHỎNG" in (note or "").upper():
         return f"MÔ PHỎNG TIM CMT {cid}"
 
+    # TikTok báo 200034 = account đã thả tim comment này rồi. Đây là trạng
+    # thái đích đã đạt nhưng KHÔNG phải một like mới; in "ĐÃ TIM" để người
+    # dùng không đọc nhầm thành lần chạy này vừa tăng like.
+    if "ĐÃ THẢ TIM TRƯỚC ĐÓ" in (note or "").upper():
+        return f"ĐÃ TIM CMT {cid}"
+
     n = like_after
     if n is None and note:
         # "like 1 → 2" hoặc "like=2" hoặc "(like=2)"

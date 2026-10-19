@@ -21,6 +21,7 @@ import threading
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
 
 from .backends.base import StopFlag
+from .backends.rate_limit import RATE_LIMIT_CODE
 from .config import RunConfig
 from .inflight import REST, TASK, tracker
 from .models import ST_FAIL, ST_RUNNING, ST_SKIP, Account, TaskResult
@@ -112,7 +113,9 @@ class AccountTask(QRunnable):
             result = self.backend.run(
                 acc, self.cfg, StopFlag(self.stop), self._progress
             )
-            if result.ok or self.stop.is_set():
+            # RATE_LIMIT_CODE = phanh của backend: không thử lại, vì gửi
+            # thêm request lúc TikTok đang chặn IP chỉ làm tình hình nặng hơn.
+            if result.ok or self.stop.is_set() or result.code == RATE_LIMIT_CODE:
                 break
 
         if self.stop.is_set() and not result.ok:

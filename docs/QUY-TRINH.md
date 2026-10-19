@@ -310,6 +310,7 @@ GUI) — hai lần lock mỗi request, không đáng kể so với network.
 | 27 | **Đồng hồ "đang chờ"** | `core/inflight.py` | Đếm request đang treo theo 4 loại: task / chờ ký / chờ TikTok / nghỉ. Worker `enter`-`leave` ở mọi điểm chặn, GUI `snapshot()` 10 lần/giây |
 | 28 | **Bộ đếm + thanh tiến độ liên mạch** | `ui/main_window.py` | Nhãn `N/M · K đang xử lý · J chờ lượt` cập nhật 100ms; thanh gộp cả % dở dang của task sống; bỏ cảnh 2 chỗ ghi tranh thanh tiến độ |
 | 29 | Test đồng hồ đang chờ | `test_inflight.py` | 30/30 PASS (unit + đường request thật + GUI offscreen) |
+| 30 | **Phanh rate limit** | `core/backends/rate_limit.py` | 20 lỗi mạng/IP liên tiếp → dừng lô, task còn lại SKIP; `200034` ghi `ĐÃ TIM CMT`, không bịa like mới. Test `test_rate_limit_guard.py` 22/22 PASS |
 
 ### 4.2. ĐANG LÀM 🔄
 
@@ -342,6 +343,12 @@ GUI) — hai lần lock mỗi request, không đáng kể so với network.
 Nhiều tài khoản xuất phát từ cùng một IP là dấu hiệu bất thường rõ nhất với TikTok.
 Đa luồng chỉ làm vấn đề **nặng thêm** — càng chạy nhanh thì càng nhiều request từ
 cùng một IP trong thời gian ngắn. Đây là thứ mấy tổng tiền (đa luồng) không giải quyết được.
+
+Khi TikTok bắt đầu trả `HTTP 200` + body rỗng, `HTTP 429`, `-1` hoặc `10221`, app
+đếm **20 lỗi mạng/rate-limit liên tiếp** rồi tự dừng lô: các account còn lại nhận
+trạng thái **Bỏ qua**, không gửi thêm request. Đây là **phanh an toàn**, không phải
+cách vượt giới hạn IP. Muốn chạy tiếp phải gán proxy khác IP cho từng account hoặc
+chờ IP nguội (thường 15–60 phút).
 
 ### 4.4.2. Luồng xử lý
 
@@ -409,14 +416,14 @@ Mật khẩu chứa `:` vẫn đúng (phần sau dấu `:` thứ 3 được nố
 | `status_code` | Nghĩa | Xử lý |
 |---|---|---|
 | `0` | OK | — |
-| `8` | Rate limit | Tăng trễ, giảm luồng |
+| `8` | Rate limit (hoặc body rỗng) | Tăng trễ, giảm luồng; app tự dừng lô sau 20 lỗi liên tiếp |
 | `10202` / `10221` | Bị chặn bot, cần xác minh | Đổi IP/proxy, giảm tần suất |
 | `10222` | IP bị chặn | Đổi proxy |
 | `200004` | Video không tồn tại | Kiểm tra `aweme_id` |
 | `200005` | Bình luận không tồn tại | Kiểm tra `cid` |
 | `200013` | Chưa đăng nhập / hết phiên | Cookie hết hạn → cần login tay |
 | `200015` | Đã bình luận rồi | Bỏ qua |
-| `200034` | Đã thả tim rồi | Bỏ qua (coi như thành công) |
+| `200034` | Đã thả tim rồi | Ghi `ĐÃ TIM CMT`, không tính là like mới |
 | `350002` | Bình luận quá nhiều | Giảm tần suất |
 
 ---

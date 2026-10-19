@@ -18,12 +18,18 @@ from ..config import (
     RunConfig,
 )
 from ..inflight import REST, tracker
-from ..models import ST_DONE, ST_FAIL, ST_OK, Account, TaskResult
+from ..models import ST_DONE, ST_FAIL, ST_OK, ST_SKIP, Account, TaskResult
 from ..parser import extract_aweme_id
 from ..proxy import IP_BLOCK_CODES
 from ..signer import Signer, SignerError
 from ..tiktok import TikTokClient, TikTokError, _code_of, explain
 from .base import Progress, StopFlag
+from .rate_limit import (
+    RATE_LIMIT_CODE,
+    RATE_LIMIT_SKIP_NOTE,
+    RATE_LIMIT_STOP_NOTE,
+    RateLimitGuard,
+)
 
 
 class HttpBackend:
@@ -33,6 +39,10 @@ class HttpBackend:
         self.signer = Signer()
         self.pool = pool
         self.rotate_on_block = rotate_on_block
+        # Dùng chung cho mọi task trong MỘT lần chạy CID. Khi TikTok bắt
+        # đầu trả body rỗng/rate limit, các task còn lại sẽ skip thay vì
+        # gửi thêm hàng trăm request làm IP bị chặn lâu hơn.
+        self._guard = RateLimitGuard()
 
     # ------------------------------------------------------------------ #
     def run(self, account: Account, cfg: RunConfig, stop: StopFlag,
@@ -40,6 +50,9 @@ class HttpBackend:
         aid = account.id
         if not account.has_session():
             return TaskResult(ST_FAIL, "cookie thiếu sessionid_ss/sid_tt")
+        if self._guard.tripped:
+            return TaskResult(ST_SKIP, RATE_LIMIT_SKIP_NOTE,
+                              code=RATE_LIMIT_CODE)
 
         client = None
         try:
@@ -115,10 +128,21 @@ class HttpBackend:
         except SignerError as e:
             return TaskResult(ST_FAIL, f"sidecar ký lỗi: {str(e)[:140]}")
         except TikTokError as e:
+            if self._guard.failure(e.code):
+                return TaskResult(
+                    ST_FAIL, f"{str(e)[:160]} · {RATE_LIMIT_STOP_NOTE}",
+                    code=RATE_LIMIT_CODE,
+                )
             # bị chặn IP -> báo để tầng trên đổi proxy rồi thử lại
             if e.code in IP_BLOCK_CODES:
+                has_pool = bool(self.pool) and getattr(
+                    self.pool, "has_any", lambda: False)()
+                if (proxy or has_pool) and self.rotate_on_block:
+                    tail = " — sẽ đổi proxy thử lại"
+                else:
+                    tail = " — không có proxy để đổi; chờ IP nguội"
                 return TaskResult(
-                    ST_FAIL, f"BỊ CHẶN IP ({e.code}) — sẽ đổi proxy thử lại", code=e.code,
+                    ST_FAIL, f"BỊ CHẶN IP ({e.code}){tail}", code=e.code,
                 )
             return TaskResult(ST_FAIL, f"{str(e)[:180]}", code=e.code)
         except Exception as e:
@@ -145,18 +169,22 @@ class HttpBackend:
         code = _code_of(res)
 
         if code == 0:
+            self._guard.success()
             note = f"♥ cid={cid}"
             like_after: int | None = None
             if cfg.verify and aweme:
                 after = self._digg_count(client, aweme, cid)
                 if before is not None and after is not None:
-                    like_after = after
                     if after > before:
+                        like_after = after
                         note += f" · like {before} → {after}"
                     elif after == before:
-                        note += f" · đã thả tim trước đó (like={after})"
+                        # Code 0 chỉ là API nhận; count không tăng có thể do
+                        # TikTok trả chậm hoặc account đã tim rồi. Không in
+                        # "N TIM CMT" để tránh tưởng lần này vừa tăng like.
+                        note += f" · chưa thấy like tăng (like={after})"
                     else:
-                        note += f" · ⚠ chưa thấy tăng (like={after})"
+                        note += f" · ⚠ like giảm? (like={after})"
                 else:
                     note += " · không đọc lại được số like"
             else:
@@ -165,8 +193,28 @@ class HttpBackend:
             return TaskResult(ST_OK, note, comment_id=cid, found=True, ok=True,
                               like_after=like_after)
 
-        msg = explain(code, res.get("status_msg", ""))
-        return TaskResult(ST_FAIL, f"API từ chối: {msg}", code=code)
+        # 200034 = TikTok báo comment đã được account này thả tim rồi.
+        # Đây là trạng thái đích đã đạt, không phải lỗi. Tuyệt đối không
+        # in "like +1" vì lần chạy này không tạo thêm like.
+        if code == 200034:
+            self._guard.success()
+            note = f"♥ cid={cid} · đã thả tim trước đó"
+            if before is not None:
+                note += f" (like={before})"
+            progress(aid, note, 100)
+            return TaskResult(ST_OK, note, comment_id=cid, found=True, ok=True,
+                              like_after=None)
+
+        return self._api_failure(
+            f"API từ chối: {explain(code, res.get('status_msg', ''))}", code
+        )
+
+    def _api_failure(self, note: str, code: int) -> TaskResult:
+        """Trả lỗi API; tự chuyển thành phanh nếu chạm ngưỡng rate limit."""
+        if self._guard.failure(code):
+            return TaskResult(ST_FAIL, f"{note} · {RATE_LIMIT_STOP_NOTE}",
+                              code=RATE_LIMIT_CODE)
+        return TaskResult(ST_FAIL, note, code=code)
 
     def _digg_count(self, client: TikTokClient, aweme: str, cid: str) -> int | None:
         try:
@@ -191,12 +239,14 @@ class HttpBackend:
         res = client.publish_comment(aweme, cfg.comment, parent_cid=cid)
         code = _code_of(res)
         if code == 0:
+            self._guard.success()
             new_cid = str((res.get("data") or {}).get("cid", ""))
             note = f"✓ đã trả lời cid={cid}" + (f" → cid mới {new_cid}" if new_cid else "")
             progress(aid, note, 100)
             return TaskResult(ST_OK, note, comment_id=new_cid or cid, found=True, ok=True)
-        return TaskResult(ST_FAIL, f"API từ chối: {explain(code, res.get('status_msg', ''))}",
-                          code=code)
+        return self._api_failure(
+            f"API từ chối: {explain(code, res.get('status_msg', ''))}", code
+        )
 
     # ------------------------------------------------------------------ #
     # Chế độ 3: tự tìm reply theo từ khoá rồi thả tim (nhiều request hơn)
@@ -221,14 +271,23 @@ class HttpBackend:
         res = client.digg_comment(aweme, cid, digg=True)
         code = _code_of(res)
         if code == 0:
-            note = f"♥ cid={cid} ({likes} → {likes + 1} like)"
+            self._guard.success()
+            # Không in "likes + 1": đây chỉ là số đọc được TRƯỚC khi thả
+            # tim, chưa đọc lại nên không được tự bịa mức tăng.
+            note = f"♥ cid={cid} · đã thả tim (like trước: {likes})"
             progress(aid, note, 100)
             return TaskResult(ST_OK, note, comment_id=cid, found=True, ok=True,
-                              like_after=likes + 1)
-        return TaskResult(
-            ST_FAIL,
+                              like_after=None)
+        if code == 200034:
+            self._guard.success()
+            note = f"♥ cid={cid} · đã thả tim trước đó (like={likes})"
+            progress(aid, note, 100)
+            return TaskResult(ST_OK, note, comment_id=cid, found=True, ok=True,
+                              like_after=None)
+        return self._api_failure(
             f"API từ chối (code {code}): "
             f"{explain(code, res.get('status_msg', ''))}",
+            code,
         )
 
     # ------------------------------------------------------------------ #

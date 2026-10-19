@@ -450,7 +450,11 @@ class TikTokClient:
                 # sidecar có thể trả cookie/msToken mới -> đồng bộ lại
                 self._absorb(signed)
 
-                if resp.status_code == 429 or resp.status_code >= 500:
+                if resp.status_code == 429:
+                    # Mã 8 = rate limit. Không thử lại ngay trong _request:
+                    # để tầng AccountTask đổi proxy (nếu có) rồi thử lại.
+                    raise TikTokError("HTTP 429 (rate limit)", 8)
+                if resp.status_code >= 500:
                     raise TikTokError(f"HTTP {resp.status_code}", -resp.status_code)
 
                 try:
@@ -459,6 +463,15 @@ class TikTokClient:
                     txt = resp.text[:200]
                     if "captcha" in txt.lower() or "verify" in txt.lower():
                         raise TikTokError("bị chặn captcha/verify", 10202)
+                    if not txt.strip():
+                        # TikTok trả 200 + body rỗng khi IP bị chặn/rate
+                        # limit. Đây là tín hiệu rất hay gặp khi chạy nhiều
+                        # account cùng một IP; báo rõ thay vì "không phải
+                        # JSON: " (log cũ trống trơn, rất khó hiểu).
+                        raise TikTokError(
+                            "TikTok trả body rỗng — thường do IP bị chặn/"
+                            "rate limit", 8, "",
+                        )
                     raise TikTokError(f"phản hồi không phải JSON: {txt}", -1, resp.text[:400])
 
                 code = _code_of(js)
@@ -468,6 +481,11 @@ class TikTokClient:
                 last = e
                 if isinstance(e, SignerError):
                     break  # sidecar hỏng thì thử lại cũng vô ích
+                if e.code in (8, 10202):
+                    # Rate limit / captcha: thử lại ngay trên cùng IP/session
+                    # gần như chắc chắn vẫn hỏng, còn làm request nặng thêm.
+                    # Để AccountTask đổi proxy (nếu có) rồi thử lại.
+                    break
                 if attempt < retries:
                     # nghỉ trước khi thử lại — cũng phải báo lên đồng hồ,
                     # nếu không người dùng thấy "đứng im" mà không biết vì sao

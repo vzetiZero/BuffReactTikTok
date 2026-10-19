@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.backends import build_backend
+from core.backends.rate_limit import RATE_LIMIT_TAG
 from core.config import (
     MODE_CHECK,
     MODE_FIND_LIKE,
@@ -1996,6 +1997,16 @@ class MainWindow(QMainWindow):
 
         n = len(accounts)
         n_own = sum(1 for a in accounts if a.proxy) if cfg.use_proxy_pool else 0
+        via_ip = n - n_own if cfg.use_proxy_pool else n
+        # Cảnh báo sớm thay vì để người dùng thấy 150 dòng "body rỗng" rồi
+        # mới hiểu. Đây là giới hạn thật của TikTok theo IP, không phải lỗi CID.
+        if via_ip >= 50 and (not cfg.use_proxy_pool or not cfg.proxy):
+            self._log(
+                "head",
+                f"⚠ {via_ip} account cùng thoát qua IP máy — TikTok thường "
+                f"chặn IP sau vài chục–200 request. Gán proxy hoặc chia lô ≤50.",
+                "warn",
+            )
         head = f"▶ cid {self._cid_pos + 1}/{total}: {cid}"
         if total > 1:
             head += f"   [{self._cid_pos + 2} cid chờ]"
@@ -2274,6 +2285,29 @@ class MainWindow(QMainWindow):
             "head",
         )
         self._refresh_pager()
+
+        # Phanh rate limit của backend đã bật -> không tự chạy CID kế tiếp
+        # trong cùng một IP đang bị chặn. Người dùng cần chờ IP nguội hoặc
+        # gán proxy rồi chạy lại các account lỗi.
+        blocked = sum(1 for r in m._rows if RATE_LIMIT_TAG in (r.note or ""))
+        if blocked and not self._queue_paused:
+            self._log(
+                "head",
+                f"⚠ {RATE_LIMIT_TAG} — đã dừng hàng đợi để tránh gửi thêm. "
+                f"Chờ IP nguội hoặc gán proxy rồi chạy lại các tài khoản lỗi.",
+                "warn",
+            )
+            if pos < total:
+                self._log(
+                    "head",
+                    f"   còn {total - pos} cid chưa chạy — không tự chạy tiếp.",
+                    "warn",
+                )
+            self._cid_queue = []
+            self._queue_paused = False
+            self._refresh_cid_label()
+            self._set_running(False)
+            return
 
         # --- sang cid kế tiếp, trừ khi người dùng bấm DỪNG ---
         if self._queue_paused:

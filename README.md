@@ -236,6 +236,12 @@ biết sidecar có đang nghẽn không.
 Vì vậy: **càng nhiều tài khoản, càng cần proxy xoay IP** (tab Cài đặt). Không có
 proxy, TikTok sẽ khóa IP sau khoảng vài chục request.
 
+Khi TikTok bắt đầu trả body rỗng / `429` / `-1` / `10221`, app tự dừng lô sau
+**20 lỗi mạng liên tiếp**; các account còn lại ghi **Bỏ qua** thay vì gửi thêm.
+Đây là phanh an toàn, không phải cách vượt giới hạn IP. Muốn chạy 200 account/CID
+liên tiếp, hãy gán proxy khác IP cho từng account (hoặc cổng VPN Express), hoặc
+chờ IP nguội 15–60 phút và chạy lại **chỉ các account lỗi** theo từng lô nhỏ.
+
 ---
 
 ## ⚠️ Cần sidecar ký request
