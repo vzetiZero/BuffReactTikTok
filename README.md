@@ -280,6 +280,10 @@ lệnh trên rồi bấm lại vào cửa sổ.
 Nút **☰ Nhật ký** trên thanh công cụ nhảy thẳng sang tab Chi tiết. Tiêu đề tab Chi
 tiết hiện số lỗi (`Chi tiết (1 lỗi)`) nên thấy ngay mà không cần mở.
 
+Sau mỗi CID, ô **Tóm tắt CID đã chạy** giữ lại từng CID kèm số account
+`thành công/tổng`, số lỗi và số bỏ qua — kể cả CID không có like nào. Nút
+**Sao chép tóm tắt CID** copy toàn bộ các dòng này để dán vào báo cáo.
+
 ## Quản lý danh sách lớn
 
 Bảng ở tab **Quản lý** xử lý được danh sách hàng chục nghìn tài khoản:

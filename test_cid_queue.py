@@ -185,14 +185,57 @@ def _run(win, dialogs):
     check("cid cuoi cung la cid thu 3",
           all(last_cid in (a.note or "") for a in accounts), True)
 
-    # Cả 3 cid phải còn trong ô "CID đã hoàn thành", không chỉ cid cuối.
+    # Cả 3 cid phải còn trong ô tóm tắt, kèm số account thành công/lỗi.
     # Trước đây _log_run_start() reset cả done_cids nên cid 1 và 2 bị mất.
     check("done_cids giữ đủ 3 cid", win.runlog.done_cids, CIDS)
-    check("ô CID đã hoàn thành có đủ 3 cid",
-          win.in_done_cid.toPlainText().splitlines(), CIDS)
+    want_lines = [
+        f"{cid} — {N_ACC}/{N_ACC} thành công · 0 lỗi · 0 bỏ qua"
+        for cid in CIDS
+    ]
+    check("ô tóm tắt có đủ 3 cid kèm số lượng",
+          win.in_done_cid.toPlainText().splitlines(), want_lines)
+    check("done_stats của cid đầu",
+          win.runlog.done_stats[CIDS[0]],
+          {"ok": N_ACC, "done": 0, "fail": 0, "skip": 0, "total": N_ACC})
     log_text = win.log_edit.toPlainText()
     check("log chính có cid đầu tiên", CIDS[0] in log_text, True)
     check("log chính có dòng cid 1/3 xong", "cid 1/3" in log_text, True)
+    check("log chính có tóm tắt cuối", "TÓM TẮT CID ĐÃ CHẠY" in log_text,
+          True)
+
+    # --- Tóm tắt có cả CID lỗi / bỏ qua, không chỉ CID thành công ---
+    print("\n=== Tóm tắt CID: thành công / lỗi / bỏ qua ===")
+    from ui.runlog import RunLogModel
+    rm = RunLogModel()
+    rm.mark_done("7690897576899658504", ok=3, fail=1, total=4)
+    rm.mark_done("7654223771003994898", ok=0, fail=4, total=4)
+    rm.mark_done("7700000000000000001", ok=0, done=4, total=4)
+    check("dòng tóm tắt đúng số lượng", rm.done_lines(), [
+        "7690897576899658504 — 3/4 thành công · 1 lỗi · 0 bỏ qua",
+        "7654223771003994898 — 0/4 thành công · 4 lỗi · 0 bỏ qua",
+        "7700000000000000001 — 4/4 hợp lệ · 0 lỗi · 0 bỏ qua",
+    ])
+    rm.mark_done("7690897576899658504", ok=2, fail=2, total=4)
+    check("chạy lại cùng CID không nhân đôi dòng",
+          len(rm.done_cids), 3)
+    check("tóm tắt lấy kết quả mới nhất của CID",
+          rm.done_lines()[0],
+          "7690897576899658504 — 2/4 thành công · 2 lỗi · 0 bỏ qua")
+
+    # --- Test: CID toàn lỗi vẫn có dòng tóm tắt 0/N ---
+    print("\n=== CID lỗi 100% vẫn phải có tóm tắt ===")
+    seen_order.clear()
+    win.controller._factory = lambda: MockBackend(fail_rate=1.0, scale=0.0)
+    win.in_cid.setPlainText(f"{CIDS[0]}\n{CIDS[1]}")
+    win.start_run()
+    wait_for(win, lambda: not win._cid_queue and not win.controller.busy,
+             timeout_ms=40000)
+    fail_lines = win.in_done_cid.toPlainText().splitlines()
+    check("cả 2 CID lỗi vẫn hiện trong tóm tắt", len(fail_lines), 2)
+    check("CID lỗi ghi đúng 0/4 và 4 lỗi", fail_lines, [
+        f"{CIDS[0]} — 0/{N_ACC} thành công · {N_ACC} lỗi · 0 bỏ qua",
+        f"{CIDS[1]} — 0/{N_ACC} thành công · {N_ACC} lỗi · 0 bỏ qua",
+    ])
 
     # --- Test 2: danh sach rong -> phai chan, khong chay ---
     print("\n=== Danh sach rong ===")

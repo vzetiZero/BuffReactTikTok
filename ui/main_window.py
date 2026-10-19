@@ -68,6 +68,7 @@ from core.models import (
     ST_DONE,
     ST_FAIL,
     ST_OK,
+    ST_RUNNING,
     ST_SKIP,
     AccountTableModel,
     format_success_line,
@@ -431,31 +432,32 @@ class MainWindow(QMainWindow):
         vh.setDefaultSectionSize(18)
         v.addWidget(self.tbl_run, 1)
 
-        # --- danh sách cid đã hoàn thành ---
-        gb_done = QGroupBox("CID đã hoàn thành")
+        # --- tóm tắt các cid đã chạy ---
+        gb_done = QGroupBox("Tóm tắt CID đã chạy")
         gd = QVBoxLayout(gb_done)
         gd.setContentsMargins(6, 4, 6, 6)
         gd.setSpacing(3)
-        self.lbl_done_cid = QLabel("Chưa có cid nào hoàn thành.")
+        self.lbl_done_cid = QLabel("Chưa có CID nào chạy xong.")
         self.lbl_done_cid.setProperty("role", "hint")
         self.lbl_done_cid.setWordWrap(True)
         gd.addWidget(self.lbl_done_cid)
         self.in_done_cid = QTextEdit()
         self.in_done_cid.setReadOnly(True)
         self.in_done_cid.setPlaceholderText(
-            "Các cid đã chạy xong sẽ hiện ở đây,\nmỗi dòng một cid.")
+            "Mỗi dòng là tóm tắt một CID:\n"
+            "<cid> — <thành công>/<tổng> thành công · lỗi · bỏ qua")
         self.in_done_cid.setFixedHeight(84)
         self.in_done_cid.setAcceptRichText(False)
         gd.addWidget(self.in_done_cid)
         hcb = QHBoxLayout()
         hcb.setSpacing(4)
-        b_copy = QPushButton("Sao chép tất cả cid đã xong")
+        b_copy = QPushButton("Sao chép tóm tắt CID")
         b_copy.setObjectName("ghost")
         b_copy.clicked.connect(self._copy_done_cids)
         hcb.addWidget(b_copy)
         b_n = QPushButton("Bỏ trống")
         b_n.setObjectName("ghost")
-        b_n.setToolTip("Xoá danh sách cid đã xong, giữ nguyên bảng log.")
+        b_n.setToolTip("Xoá tóm tắt CID đã chạy, giữ nguyên bảng log.")
         b_n.clicked.connect(self._clear_done_cids)
         hcb.addWidget(b_n)
         hcb.addStretch(1)
@@ -466,38 +468,39 @@ class MainWindow(QMainWindow):
     def _clear_runlog(self) -> None:
         self.runlog.reset()
         self.in_done_cid.clear()
-        self.lbl_done_cid.setText("Chưa có cid nào hoàn thành.")
+        self.lbl_done_cid.setText("Chưa có CID nào chạy xong.")
         self._refresh_run_stat()
         self.pbar.setValue(0)
 
     def _clear_done_cids(self) -> None:
         self.runlog.clear_done()
         self.in_done_cid.clear()
-        self.lbl_done_cid.setText("Chưa có cid nào hoàn thành.")
+        self.lbl_done_cid.setText("Chưa có CID nào chạy xong.")
 
     def _copy_done_cids(self) -> None:
         from PySide6.QtWidgets import QApplication
-        cids = list(self.runlog.done_cids)
-        if not cids:
+        lines = self.runlog.done_lines()
+        if not lines:
             QMessageBox.information(
-                self, "Chưa có cid nào xong",
-                "Chưa có cid nào hoàn thành để sao chép.")
+                self, "Chưa có CID nào xong",
+                "Chưa có CID nào chạy xong để sao chép.")
             return
-        QApplication.clipboard().setText("\n".join(cids))
-        self._log("cid", f"Đã sao chép {len(cids)} cid hoàn thành.", "ok")
+        QApplication.clipboard().setText("\n".join(lines))
+        self._log("cid", f"Đã sao chép tóm tắt {len(lines)} CID.", "ok")
 
     def _refresh_run_stat(self) -> None:
-        """Cập nhật thanh thống kê + danh sách cid đã xong."""
+        """Cập nhật thanh thống kê + tóm tắt CID đã chạy."""
         m = self.runlog
         self.lbl_run_stat.setText(m.stats_text())
-        cids = m.done_cids
-        if cids:
+        lines = m.done_lines()
+        if lines:
             self.lbl_done_cid.setText(
-                f"{len(cids)} cid đã xong. Bấm 'Sao chép' để lấy danh sách.")
-            if self.in_done_cid.toPlainText().split("\n") != cids:
-                self.in_done_cid.setPlainText("\n".join(cids))
+                f"{len(lines)} CID đã chạy xong — tóm tắt bên dưới.")
+            text = "\n".join(lines)
+            if self.in_done_cid.toPlainText() != text:
+                self.in_done_cid.setPlainText(text)
         else:
-            self.lbl_done_cid.setText("Chưa có cid nào hoàn thành.")
+            self.lbl_done_cid.setText("Chưa có CID nào chạy xong.")
             if self.in_done_cid.toPlainText():
                 self.in_done_cid.clear()
 
@@ -917,10 +920,10 @@ class MainWindow(QMainWindow):
         act("Bỏ tick những tài khoản đã die", self._untick_dead,
             not self.controller.busy)
         m.addSeparator()
-        a = act("⧉ Sao chép các cid đã hoàn thành", self._copy_done_cids,
+        a = act("⧉ Sao chép tóm tắt CID đã chạy", self._copy_done_cids,
                 bool(self.runlog.done_cids))
         if a and not a.isEnabled():
-            a.setToolTip("Chưa có cid nào hoàn thành.")
+            a.setToolTip("Chưa có CID nào chạy xong.")
         act("✕ Xoá bảng log", self._clear_runlog, True)
         m.exec(self.tbl_run.viewport().mapToGlobal(pos))
 
@@ -2218,7 +2221,7 @@ class MainWindow(QMainWindow):
     def _on_status(self, acc_id: str, status: str, note: str) -> None:
         self.model.update_row(acc_id, status=status, note=note)
         # thẻ chi tiết đang hiển thị tài khoản này -> vẽ lại
-        if status in (ST_OK, ST_DONE):
+        if status == ST_OK:
             # Ưu tiên dòng gọn kiểu "2 TIM CMT <cid>" để copy đi dùng.
             # Không đọc được cid thì giữ note gốc, không mất thông tin.
             acc = self.model.by_id(acc_id)
@@ -2233,14 +2236,19 @@ class MainWindow(QMainWindow):
                 self.model.update_row(acc_id, note=line)
             self._log_row(acc_id, note=line or note or status,
                           status=LG_OK, ok=True)
+        elif status == ST_DONE:
+            # Chế độ kiểm tra phiên: đăng nhập hợp lệ, không có like.
+            self._log(acc_id, f"✔ {note or status}", "ok")
+            self._log_row(acc_id, note=note or status, status=LG_DONE)
         elif status == ST_FAIL:
             self._log(acc_id, f"✖ {note}", "err")
             self._log_row(acc_id, note=note, status=LG_FAIL, ok=False)
         elif status == ST_SKIP:
             self._log(acc_id, f"– {note or status}", "warn")
             self._log_row(acc_id, note=note or status, status="Bỏ qua")
-        else:   # ST_DONE: đăng nhập hợp lệ, chưa bình luận (chế độ check)
-            self._log_row(acc_id, note=note or status, status=LG_DONE)
+        elif status == ST_RUNNING:
+            # Chỉ đổi trạng thái dòng, không ghi thành công/hoàn tất.
+            self._log_row(acc_id, note=note or status, status=LG_RUN)
 
     @Slot(str, int)
     def _on_progress(self, acc_id: str, pct: int) -> None:
@@ -2278,10 +2286,11 @@ class MainWindow(QMainWindow):
         )
         cid = self._cid_queue[self._cid_pos] if self._cid_queue else ""
         # Một CID có thể xong mà không có account nào thành công (rate limit).
-        # Vẫn phải ghi vào ô "CID đã hoàn thành" — đây là CID đã chạy xong,
+        # Vẫn phải ghi vào ô "Tóm tắt CID đã chạy" — đây là CID đã chạy xong,
         # không phải danh sách CID có like thành công.
         if cid:
-            m.mark_done(cid)
+            m.mark_done(cid, ok=ok, done=done, fail=err, skip=skip,
+                        total=n_rows)
             self._refresh_run_stat()
         pos = self._cid_pos + 1
         total = len(self._cid_queue)
@@ -2310,6 +2319,7 @@ class MainWindow(QMainWindow):
                     f"   còn {total - pos} cid chưa chạy — không tự chạy tiếp.",
                     "warn",
                 )
+            self._log_done_summary()
             self._cid_queue = []
             self._queue_paused = False
             self._refresh_cid_label()
@@ -2325,6 +2335,7 @@ class MainWindow(QMainWindow):
                 if left else "Đã dừng theo yêu cầu.",
                 "warn",
             )
+            self._log_done_summary()
             self._cid_queue = []
             self._queue_paused = False
             self._refresh_cid_label()
@@ -2340,8 +2351,18 @@ class MainWindow(QMainWindow):
         # hết hàng đợi
         self._cid_queue = []
         self._log("head", f"■ ĐÃ XONG toàn bộ {total} cid.", "head")
+        self._log_done_summary()
         self._refresh_cid_label()
         self._set_running(False)
+
+    def _log_done_summary(self) -> None:
+        """In tóm tắt cuối cùng: mỗi CID đã chạy được bao nhiêu account."""
+        lines = self.runlog.done_lines()
+        if not lines:
+            return
+        self._log("head", "■ TÓM TẮT CID ĐÃ CHẠY", "head")
+        for line in lines:
+            self._log("cid", line, "ok")
 
     # ------------------------------------------------------------------ #
     def _log(self, tag: str, message: str, level: str = "info") -> None:

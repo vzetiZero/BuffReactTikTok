@@ -72,8 +72,10 @@ class RunLogModel(QAbstractTableModel):
         super().__init__(parent)
         self._rows: list[RunRow] = []
         self._max_rows = max_rows
-        # các cid đã chạy xong, giữ thứ tự — dùng cho ô "cid đã xong"
+        # các cid đã chạy xong, giữ thứ tự — dùng cho ô "CID đã xong"
         self.done_cids: list[str] = []
+        # tóm tắt cuối mỗi cid: ok / done / fail / skip / total
+        self.done_stats: dict[str, dict[str, int]] = {}
         self.n_ok = 0
         self.n_fail = 0
 
@@ -89,17 +91,57 @@ class RunLogModel(QAbstractTableModel):
         self._rows.clear()
         if not keep_done:
             self.done_cids.clear()
+            self.done_stats.clear()
         self.n_ok = 0
         self.n_fail = 0
         self.endResetModel()
 
-    def mark_done(self, cid: str) -> None:
-        """Ghi nhận CID đã chạy xong, kể cả khi mọi account đều lỗi."""
-        if cid and cid not in self.done_cids:
+    def mark_done(self, cid: str, *, ok: int = 0, done: int = 0,
+                  fail: int = 0, skip: int = 0, total: int = 0) -> None:
+        """Ghi nhận CID đã chạy xong kèm số lượng để tóm tắt.
+
+        Gọi ở CUỐI mỗi CID, kể cả khi mọi account đều lỗi. Nhờ vậy ô tóm
+        tắt có cả CID 0 like, không chỉ CID có ít nhất một account thành
+        công.
+        """
+        if not cid:
+            return
+        if cid not in self.done_cids:
             self.done_cids.append(cid)
+        self.done_stats[cid] = {
+            "ok": int(ok),
+            "done": int(done),
+            "fail": int(fail),
+            "skip": int(skip),
+            "total": int(total),
+        }
+
+    def done_lines(self) -> list[str]:
+        """Các dòng tóm tắt cuối cùng, mỗi CID một dòng."""
+        out: list[str] = []
+        for cid in self.done_cids:
+            s = self.done_stats.get(cid)
+            if not s:
+                continue
+            total = s["total"]
+            ok = s["ok"]
+            done = s["done"]
+            fail = s["fail"]
+            skip = s["skip"]
+            if done and not ok:
+                # Chế độ chỉ kiểm tra phiên: không có like, chỉ có hợp lệ.
+                line = f"{cid} — {done}/{total} hợp lệ"
+            else:
+                line = f"{cid} — {ok}/{total} thành công"
+                if done:
+                    line += f" · {done} hợp lệ"
+            line += f" · {fail} lỗi · {skip} bỏ qua"
+            out.append(line)
+        return out
 
     def clear_done(self) -> None:
         self.done_cids.clear()
+        self.done_stats.clear()
 
     def add(self, acc: str, cid: str = "", name: str = "") -> RunRow:
         """Thêm một dòng cho tài khoản sắp chạy."""
@@ -154,11 +196,8 @@ class RunLogModel(QAbstractTableModel):
     def set_status(self, acc: str, status: str, note: str = "",
                    ok: bool | None = None) -> RunRow | None:
         r = self.update(acc, note=note, status=status, ok=ok)
-        if r and r.status in (ST_OK, ST_DONE) and r.cid:
-            if r.cid not in self.done_cids:
-                self.done_cids.append(r.cid)
-            if r.status == ST_OK:
-                self.n_ok += 1
+        if r and r.status == ST_OK:
+            self.n_ok += 1
         elif r and r.status == ST_FAIL:
             self.n_fail += 1
         return r
