@@ -174,7 +174,8 @@ class TikTokClient:
 
     def __init__(self, account: Account, signer: Signer, region: str = "VN",
                  timezone: str = "Asia/Bangkok", proxy: str = "",
-                 timeout: float = 20.0, language: str = "en"):
+                 timeout: float = 20.0, language: str = "en",
+                 referer: str = ""):
         self.account = account
         self.signer = signer
         self.region = region
@@ -183,6 +184,9 @@ class TikTokClient:
         self._ua = DEFAULT_UA
         self._lock = threading.RLock()
         self.language = language
+        # Trang đang mở khi bấm like. Request thật gửi cả query `referer` và
+        # header `Referer` bằng URL video, không phải trang chủ.
+        self.referer = referer.strip()
         self.os, self.platform, self.platform_desc, _ = PLATFORMS["windows"]
         self.locale_path = "en"
 
@@ -299,15 +303,23 @@ class TikTokClient:
 
         Bốn điều TikTok kiểm tra, thiếu một là fail:
           1. `os` + `browser_platform` phải khớp UA (windows ⇔ Win32)
-          2. `browser_version` phải chứa đúng số hiệu Chrome trong UA
+          2. `browser_version` phải khớp UA (Chrome/150, Safari/18.6, …)
           3. `tz_name` + `region` phải khớp cookie (`store-country-code`, `store-idc`)
           4. Ngôn ngữ (`app_language`, `language`, `webcast_language`) phải đồng bộ
              với `browser_language` — dùng `vi-VN` nếu cookie là tài khoản VN.
         """
         nav = self.signer.navigator()
         ua = self._ua
-        # `X-Dynosaur` gắn với UA cụ thể; sidecar tự sinh, ta không tự đặt.
-        chrome_ver = _chrome_version(ua)
+        # `browser_version` trong request thật chính là UA bỏ tiền tố
+        # "Mozilla/". Với Chrome thì trùng công thức cũ; với Safari (sidecar
+        # mặc định) công thức Chrome/131 là SAI hoàn toàn.
+        browser_version = ua.replace("Mozilla/", "", 1) if ua else ""
+        if not browser_version:
+            browser_version = (
+                f"5.0 ({self.platform_desc}) AppleWebKit/537.36 "
+                f"(KHTML, like Gecko) Chrome/{_chrome_version(ua)} Safari/537.36"
+            )
+        referer = self.referer or f"https://www.tiktok.com/{self.locale_path}/"
         p = {
             "aid": "1988",
             "app_language": self.language,
@@ -316,8 +328,7 @@ class TikTokClient:
             "browser_name": "Mozilla",
             "browser_online": "true",
             "browser_platform": self.platform,
-            "browser_version": f"5.0 ({self.platform_desc}) AppleWebKit/537.36 "
-                               f"(KHTML, like Gecko) Chrome/{chrome_ver} Safari/537.36",
+            "browser_version": browser_version,
             "channel": "tiktok_web",
             "channel_id": "0",
             "cookie_enabled": "true",
@@ -325,12 +336,12 @@ class TikTokClient:
             "device_platform": "web_pc",
             "focus_state": "true",
             "from_page": "video",
-            "history_len": "8",
+            "history_len": "7",
             "is_fullscreen": "false",
             "is_page_visible": "true",
             "os": self.os,
             "priority_region": self.region,
-            "referer": f"https://www.tiktok.com/{self.locale_path}/",
+            "referer": referer,
             "root_referer": "https://www.google.com/",
             "region": self.region,
             "screen_height": nav.get("screen_height", "1080"),
@@ -353,19 +364,38 @@ class TikTokClient:
         return p
 
     def _headers(self) -> dict[str, str]:
+        lang = self.language or "en"
+        base_lang = lang.split("-")[0]
+        referer = self.referer or f"https://www.tiktok.com/{self.locale_path}/"
         h = {
             "User-Agent": self._ua,
             "Accept": "*/*",
-            "Accept-Language": f"{self.language},en;q=0.9",
-            # Referer là trang chủ theo locale, KHÔNG phải URL video —
-            # đúng như request thật trong DevTools.
-            "Referer": f"https://www.tiktok.com/{self.locale_path}/",
+            # Request thật của Chrome 150 có danh sách ngôn ngữ đầy đủ hơn
+            # `vi-VN,en;q=0.9`; giữ đúng thứ tự ưu tiên của tài khoản.
+            "Accept-Language": f"{lang},{base_lang};q=0.9,en-US;q=0.8,en;q=0.7",
+            # Referer là chính trang video đang mở, không phải trang chủ.
+            "Referer": referer,
             "Origin": "https://www.tiktok.com",
             "Sec-Fetch-Dest": "empty",
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-User": "?1",
         }
+        # Client Hints: Chrome gửi kèm; Safari thì không. Phải khớp UA.
+        if "Chrome/" in self._ua or "Chromium/" in self._ua:
+            m = re.search(r"(?:Chrome|Chromium)/(\d+)", self._ua)
+            if m:
+                ver = m.group(1)
+                brands = f'"Not;A=Brand";v="8", "Chromium";v="{ver}"'
+                if "Chrome/" in self._ua:
+                    brands += f', "Google Chrome";v="{ver}"'
+                h["sec-ch-ua"] = brands
+                h["sec-ch-ua-mobile"] = "?0"
+                if "Windows" in self._ua:
+                    h["sec-ch-ua-platform"] = '"Windows"'
+                elif "Macintosh" in self._ua:
+                    h["sec-ch-ua-platform"] = '"macOS"'
+                else:
+                    h["sec-ch-ua-platform"] = '"Linux"'
         if self.csrf:
             # tên header đúng TikTok dùng: `tt-csrf-token` (không phải x-csrf-token)
             h["tt-csrf-token"] = self.csrf
@@ -380,6 +410,12 @@ class TikTokClient:
         raw_url = f"https://www.tiktok.com{path}?{query}"
         payload = json.dumps(body, separators=(",", ":")) if body is not None else ""
         data = payload.encode() if payload else None
+        # Request like thật là POST với body rỗng nhưng vẫn có
+        # `Content-Type: application/x-www-form-urlencoded` và Content-Length 0.
+        # curl_cffi chỉ gửi Content-Length 0 khi data là bytes rỗng.
+        empty_post = method.upper() == "POST" and data is None
+        if empty_post:
+            data = b""
 
         last: Exception | None = None
         for attempt in range(retries + 1):
@@ -397,7 +433,9 @@ class TikTokClient:
                 # mang đúng UA đó. Lệch một ký tự là TikTok từ chối.
                 self._adopt_navigator(signed.get("navigator") or {})
                 headers = self._headers()
-                if data is not None:
+                if empty_post:
+                    headers["Content-Type"] = "application/x-www-form-urlencoded"
+                elif data is not None:
                     headers["Content-Type"] = "application/json"
 
                 tok = tracker.enter(HTTP)
@@ -486,17 +524,23 @@ class TikTokClient:
             {"aweme_id": aweme_id, "cursor": cursor, "count": count, "item_type": 0},
             None,
         )
-        return r.get("data") or {}
+        # TikTok trả `comments` NGAY Ở CẤP NGOÀI (cùng status_code, cursor,
+        # has_more), không bọc trong `data`. Code cũ chỉ lấy `r["data"]` nên
+        # luôn nhận {} và mọi bước verify đọc số like đều thất bại. Vẫn giữ
+        # nhánh `data` để tương thích nếu TikTok đổi cấu trúc.
+        return r.get("data") or r
 
     def comment_replies(self, aweme_id: str, comment_id: str, cursor: int = 0,
                         count: int = 20) -> dict:
         r = self._request(
             "GET", EP_COMMENT_REPLY,
-            {"aweme_id": aweme_id, "item_id": comment_id, "cursor": cursor,
+            # Endpoint này nhận `comment_id`, KHÔNG phải `item_id`. Gửi sai
+            # tên -> TikTok trả status_code=5 (thông số không hợp lệ).
+            {"aweme_id": aweme_id, "comment_id": comment_id, "cursor": cursor,
              "count": count, "item_type": 0},
             None,
         )
-        return r.get("data") or {}
+        return r.get("data") or r
 
     def digg_comment(self, aweme_id: str, comment_id: str, digg: bool = True) -> dict:
         """Thả tim / bỏ tim 1 bình luận.

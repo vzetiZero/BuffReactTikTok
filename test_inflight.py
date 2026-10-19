@@ -108,7 +108,10 @@ def test_gauges_on_gui() -> None:
     w.settings.remember_accounts = False   # test khong duoc ghi vao bo nho that
     w._apply_accounts(mk(60), "test")
     w.model.select_all_with_session()
-    w.backend_kind.setCurrentIndex(w.backend_kind.findData("mock"))
+    # GUI that luon dung HTTP; test nay gan thang MockBackend vao controller.
+    from core.backends.mock_backend import MockBackend
+    w._signer_ready = True
+    w.controller._factory = lambda: MockBackend(fail_rate=0.0, scale=1.0)
     w.sp_threads.setValue(12)
     w.sp_dmin.setValue(0.0)
     w.sp_dmax.setValue(0.0)

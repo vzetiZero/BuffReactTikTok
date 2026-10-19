@@ -76,7 +76,7 @@ def main():
     win = MainWindow()
     # Chặn tự nạp lại tài khoản đã lưu, nếu không nó ghi đè dữ liệu demo.
     win._restore_accounts = lambda: None
-    win.backend_kind.setCurrentIndex(win.backend_kind.findData("mock"))
+    win.backend_kind.setCurrentIndex(win.backend_kind.findData("http"))
     win._signer_ready = True
 
     win._apply_accounts(build_accounts(), "demo")

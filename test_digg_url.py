@@ -12,20 +12,20 @@ from core.tiktok import EP_COMMENT_DIGG, TikTokClient
 
 # ---- request thật bạn gửi (lấy từ DevTools) ----
 REAL = {
-    "WebIdLastTime": "1790676569", "aid": "1988", "app_language": "vi-VN",
-    "app_name": "tiktok_web", "aweme_id": "7690231603343265042",
+    "WebIdLastTime": "1792412177", "aid": "1988", "app_language": "vi-VN",
+    "app_name": "tiktok_web", "aweme_id": "7690908625404955910",
     "browser_language": "vi-VN", "browser_name": "Mozilla",
     "browser_online": "true", "browser_platform": "Win32",
     "browser_version": "5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                       "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+                       "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
     "channel": "tiktok_web", "channel_id": "0",
-    "cid": "7690897576899658504", "cookie_enabled": "true",
-    "data_collection_enabled": "true", "device_id": "7690897284192421396",
+    "cid": "7698352113629348629", "cookie_enabled": "true",
+    "data_collection_enabled": "true", "device_id": "7698351669759510024",
     "device_platform": "web_pc", "digg_type": "1", "focus_state": "true",
-    "from_page": "video", "history_len": "8", "is_fullscreen": "false",
-    "is_page_visible": "true", "odinId": "7603950839691281425",
+    "from_page": "video", "history_len": "7", "is_fullscreen": "false",
+    "is_page_visible": "true", "odinId": "7506454103963386888",
     "os": "windows", "priority_region": "VN",
-    "referer": "https://www.tiktok.com/vi-VN/",
+    "referer": "https://www.tiktok.com/@hoangg_shinn022/video/7690908625404955910",
     "region": "VN", "root_referer": "https://www.google.com/",
     "screen_height": "1080", "screen_width": "1920",
     "tz_name": "Asia/Bangkok", "user_is_login": "true",
@@ -39,7 +39,7 @@ VOLATILE = {"WebIdLastTime"}
 # so phu thuoc may cua nguoi dung (UA cua sidecar) -> khong so sanh gia tri
 ENV_DEPENDENT = {"browser_version", "browser_platform", "os", "screen_height",
                  "screen_width", "device_id", "odinId", "verifyFp", "WebIdLastTime",
-                 "aweme_id", "cid"}
+                 "aweme_id", "cid", "referer"}
 
 fail = 0
 
@@ -52,7 +52,7 @@ section("1. Client co lay dung tham so tu cookie khong?")
 accs = load_accounts("cokie.tik.txt")
 acc = accs[0]
 client = TikTokClient(acc, Signer(), region="VN", timezone="Asia/Bangkok",
-                      language="")
+                      language="", referer=REAL["referer"])
 c = client
 print(f"  store-country-code : {acc.cookie.get('store-country-code')}")
 print(f"  -> language        : {c.language}   (mong doi vi-VN)")
@@ -69,8 +69,8 @@ if not c.verify_fp:
 
 section("2. URL ta sinh co khop request that khong?")
 mine = c.base_params({
-    "aweme_id": "7690231603343265042",
-    "cid": "7690897576899658504",
+    "aweme_id": "7690908625404955910",
+    "cid": "7698352113629348629",
     "digg_type": 1,
 })
 mine_keys = set(mine)
@@ -112,11 +112,14 @@ print(f"  Referer       : {h.get('Referer')}")
 print(f"  Accept-Language: {h.get('Accept-Language')}")
 if "tt-csrf-token" not in h:
     fail += 1
+if h.get("Referer") != REAL["referer"]:
+    fail += 1
+    print(f"  !! Referer sai: {h.get('Referer')}")
 
 section("4. URL day du (chua ky)")
 print("  " + c.debug_url(EP_COMMENT_DIGG, {
-    "aweme_id": "7690231603343265042",
-    "cid": "7690897576899658504",
+    "aweme_id": "7690908625404955910",
+    "cid": "7698352113629348629",
     "digg_type": 1,
 }, sign=False)[:300] + " …")
 
@@ -126,7 +129,8 @@ print("  Request that cua ban co ca 3:")
 print("    X-Bogus   = 1              (gia tri de, chi la co so tao ky)")
 print("    X-Gnarly  = MCeokLHWFSX1…  (chu ky that su)")
 print("    X-Dynosaur= M8ln-splcyYy…  (chu ky phu)")
-print("  -> app lay signed_url tu sidecar, khong tu dich cac chu ky nay.")
+print("  Sidecar hien tai moi sinh X-Bogus + X-Gnarly, chua co X-Dynosaur.")
+print("  comment/digg van chay voi 2 chu ky; app khong tu dich chu ky nao.")
 
 print(f"\n{'=' * 50}")
 print(f"  {'HOP LE' if not fail else f'{fail} KHAC BIET'}")

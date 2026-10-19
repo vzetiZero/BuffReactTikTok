@@ -141,18 +141,21 @@ cookie nữa.
 ### Cài cho nhiều máy
 
 Cài trên **một** máy đã có Node + sidecar chạy được, rồi copy toàn bộ thư mục
-sang máy khác — `tiktok-signature/` và `.venv/` đều **không** nằm trong git
-(`.gitignore`) nên phải copy riêng, hoặc chạy lại `install.bat` + `signer.bat`
-trên mỗi máy.
+sang máy khác. Source sidecar (`server.mjs`, `javascript/`) đã nằm trong repo;
+chỉ `node_modules/` và Chromium là không commit, nên chạy `signer.bat` trên máy
+mới để tải lại. `.venv/` cũng không nằm trong git — chạy `install.bat` để tạo lại.
 
 ### Xem nhanh
 
 | Muốn | Dùng gì |
 |---|---|
-| Xem giao diện, không cần mạng | Backend = `mock`, bấm **Thử 1 tài khoản** |
+| Test giao diện, không cần mạng | `python test_cid_queue.py` (mock chỉ dùng trong test; GUI luôn gửi thật) |
 | Dọn file cookie, không cần Node | Chuột phải → **Dọn nhanh** |
 | Thả tim thật | Cần sidecar + proxy xoay IP |
 | Kiểm tra tài khoản còn sống | Chuột phải → **Kiểm tra trạng thái** |
+
+> **Giao diện không có lựa chọn mock.** Mọi lượt chạy từ GUI đều gửi request
+> TikTok thật; nếu sidecar chưa sẵn sàng, app báo lỗi chứ không giả lập.
 
 ---
 
@@ -185,15 +188,18 @@ trên mỗi máy.
    (cũng nhận phân tách bằng dấu phẩy):
 
    ```
-   7690897576899658504
-   7654223771003994898
+   7698352113629348629
+   7697215876224303888
    ```
 
    Bấm **▶ CHẠY**: chạy hết đàn tài khoản cho cid đầu tiên, rồi **tự chuyển sang
    cid kế tiếp** — log kiểu `▶ cid 2/5: …`. Bấm **■ DỪNG** giữa chừng sẽ xoá
    luôn các cid còn lại trong hàng đợi.
 
-   Không cần `aweme_id` — endpoint `/api/comment/digg/` chỉ cần `cid`.
+   `aweme_id` không bắt buộc — endpoint `/api/comment/digg/` chỉ cần `cid`. Tuy
+   nhiên nên dán thêm **Video URL** (ô tùy chọn ngay dưới danh sách cid): app sẽ
+   gửi `aweme_id` và dùng chính URL đó làm `Referer`, giống request thật, đồng
+   thời bật được bước đọc lại số like.
 
 5. Đặt **Số luồng**, rồi bấm **▶ CHẠY**. Backend mặc định là **http** để gửi
    request thật. Các tài khoản được đưa vào hàng đợi chung; worker nào xong
@@ -223,6 +229,10 @@ và **giới hạn tần suất của TikTok theo IP**. Tăng luồng từ 20 l�
 **không nhanh thêm** — chỉ làm hàng đợi dài ra. Xem dải màu cam trong ô đồng hồ để
 biết sidecar có đang nghẽn không.
 
+Đo thực tế với sidecar Windows Chrome 144, 10 account / 10 luồng: **1,69 giây**
+(~5,9 account/s, ~11,8 chữ ký/s) khi pool đã ấm. Nếu sidecar vừa xoay identity
+(định kỳ 30 phút), lần chạy đầu có thể chậm hơn nhiều do phải khởi tạo Chromium.
+
 Vì vậy: **càng nhiều tài khoản, càng cần proxy xoay IP** (tab Cài đặt). Không có
 proxy, TikTok sẽ khóa IP sau khoảng vài chục request.
 
@@ -232,10 +242,11 @@ proxy, TikTok sẽ khóa IP sau khoảng vài chục request.
 
 TikTok bắt buộc mọi request API có chữ ký `X-Bogus` / `X-Gnarly`. App này **không tự
 reverse-engineer** mà gọi một tiến trình Node dùng SDK thật, chạy cục bộ ở
-`http://127.0.0.1:8080`:
+`http://127.0.0.1:8080`. Sidecar giả lập **Windows Chrome 144**
+(`navigator.platform=Win32`, viewport 1920×1080); app tự lấy UA này để dựng
+`browser_version`, `os`, `browser_platform` và client hints:
 
 ```bash
-git clone https://github.com/carcabot/tiktok-signature.git
 cd tiktok-signature
 npm install
 npx puppeteer browsers install chrome
@@ -359,8 +370,10 @@ phát hiện. Xem tab Cài đặt.
 
 Request thả tim gửi tới `POST /api/comment/digg/` với 27 tham số fingerprint. App tự
 lấy từ cookie và suy ra từ User-Agent của sidecar: ngôn ngữ theo `store-country-code`,
-`verifyFp` từ cookie `s_v_web_id`, `history_len=8`, header `tt-csrf-token`, `Referer`
-trang chủ theo locale.
+`verifyFp` từ cookie `s_v_web_id`, `browser_version` = UA bỏ `Mozilla/`,
+`history_len=7`, header `tt-csrf-token`, và `Referer` = URL video khi có
+`aweme_id`/Video URL (fallback trang chủ). POST body rỗng vẫn gửi
+`Content-Type: application/x-www-form-urlencoded`; UA Chrome kèm `sec-ch-ua*`.
 
 Chạy `python test_digg_url.py` để so toàn bộ tham số với request thật của bạn.
 
@@ -384,7 +397,7 @@ core/
   backends/
     base.py                interface + Progress/StopFlag
     http_backend.py        tác vụ thật
-    mock_backend.py        giả lập để test
+    mock_backend.py        giả lập, chỉ dùng trong test tự động
 ui/
   main_window.py           tab Quản lý + Tác vụ
   settings_tab.py          tab Cài đặt (proxy, cổng VPN Express, cấu hình)

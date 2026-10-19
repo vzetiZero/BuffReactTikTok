@@ -17,9 +17,13 @@ settings.json
 # nhưng chặn luôn ở đây phòng khi ai đó tạo nhầm trong repo.
 accounts.json
 
-# Sidecar ký chữ ký — tải bằng signer.bat, KHÔNG commit
-# (node_modules + Chromium nặng vài trăm MB)
-tiktok-signature/
+# Sidecar ký chữ ký — commit source cần thiết để cài mới chạy được,
+# nhưng KHÔNG commit node_modules / Chromium / profile trình duyệt.
+tiktok-signature/node_modules/
+tiktok-signature/.chrome-profile/
+tiktok-signature/.cache/
+tiktok-signature/coverage/
+tiktok-signature/.env
 
 # Kết quả xuất
 result*.csv

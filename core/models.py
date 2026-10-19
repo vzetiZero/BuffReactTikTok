@@ -174,6 +174,12 @@ def format_success_line(
     if not cid:
         return ""
 
+    # Mock chỉ mô phỏng: không được in "N TIM CMT" vì N là số bịa, người
+    # dùng sẽ tưởng bình luận thật đã tăng like. Giữ nhãn MÔ PHỎNG để phân
+    # biệt rõ với kết quả HTTP thật.
+    if "MÔ PHỎNG" in (note or "").upper():
+        return f"MÔ PHỎNG TIM CMT {cid}"
+
     n = like_after
     if n is None and note:
         # "like 1 → 2" hoặc "like=2" hoặc "(like=2)"

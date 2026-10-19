@@ -46,11 +46,21 @@ class HttpBackend:
             # proxy riêng của account, không có thì dùng proxy chung
             proxy = "" if not cfg.use_proxy_pool else (account.proxy or cfg.proxy)
             progress(aid, f"Kết nối{' qua proxy' if proxy else ' (IP máy)'}...", 5)
+            # Request thật gửi Referer = URL video đang mở. Ưu tiên URL đầy
+            # đủ trong cfg.video; nếu chỉ có aweme_id thì dựng URL chuẩn.
+            video = (cfg.video or "").strip()
+            aweme = (cfg.aweme_id or "").strip() or extract_aweme_id(video)
+            if video.startswith(("http://", "https://")):
+                referer = video
+            elif aweme:
+                referer = f"https://www.tiktok.com/@/video/{aweme}"
+            else:
+                referer = ""
             client = TikTokClient(
                 account, self.signer,
                 region=cfg.region, timezone=cfg.timezone,
                 proxy=proxy, timeout=cfg.timeout,
-                language=cfg.language or "en",
+                language=cfg.language or "en", referer=referer,
             )
 
             # --- 1. xác nhận đăng nhập ------------------------------- #

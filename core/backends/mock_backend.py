@@ -33,7 +33,7 @@ class MockBackend:
         if not account.has_session():
             return TaskResult(ST_FAIL, "cookie thiếu sessionid_ss")
 
-        progress(aid, "Đăng nhập (giả lập)...", 15)
+        progress(aid, "Đăng nhập MÔ PHỎNG (không gửi TikTok)...", 15)
         if self._nap(stop, random.uniform(0.2, 0.5)):
             return TaskResult(ST_FAIL, "đã dừng")
 
@@ -44,18 +44,20 @@ class MockBackend:
         if cfg.mode == MODE_CHECK:
             return TaskResult(ST_DONE, f"Cookie hợp lệ ({account.username})", ok=True)
 
-        progress(aid, f"Thả tim cid={cfg.cid or '-'}...", 65)
+        progress(aid, f"Thả tim MÔ PHỎNG cid={cfg.cid or '-'}...", 65)
         if self._nap(stop, 0.4):
             return TaskResult(ST_FAIL, "đã dừng")
 
-        before = random.randint(10, 2000)
+        # KHÔNG bịa số like. Trước đây mock sinh số ngẫu nhiên 10..2000 và
+        # ghi "like 358 → 359"; người dùng dễ tưởng đó là số like thật của
+        # bình luận. Mock chỉ để test giao diện nên chỉ báo mô phỏng.
         cid = cfg.cid or str(7 * 10**18 + _mint(aid))
-        note = f"♥ cid={cid} · like {before} → {before + 1}"
+        note = f"MÔ PHỎNG · ♥ cid={cid} · không gửi TikTok"
         progress(aid, note, 100)
         return TaskResult(
             ST_OK, note, comment_id=cid,
             found=cfg.mode == MODE_LIKE_CID, ok=True,
-            like_after=before + 1,
+            like_after=None,
         )
 
     def close_thread(self) -> None:

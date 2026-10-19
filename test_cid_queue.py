@@ -124,7 +124,7 @@ def _run(win, dialogs):
     # dùng backend mock + 0 chờ để test chạy nhanh, và bỏ chặn sidecar
     from core.backends.mock_backend import MockBackend
     win.controller._factory = lambda: MockBackend(fail_rate=0.0, scale=0.0)
-    win.backend_kind.setCurrentIndex(win.backend_kind.findData("mock"))
+    # GUI that khong con lua chon mock; test tu gan factory MockBackend.
     win._signer_ready = True
 
     accounts = make_accounts(N_ACC)
@@ -168,13 +168,15 @@ def _run(win, dialogs):
     print(f"\n  ghi chu tung tai khoan:")
     for a in accounts:
         print(f"    {a.username}: {a.note}")
-    # Ghi chú thành công nay rút gọn thành "N TIM CMT <cid>" (xem
-    # core.models.format_success_line) thay vì note dài "♥ cid=... · like a → b".
-    # Nên phải kiểm theo định dạng MỚI, không phải "cid=" cũ.
+    # Ghi chú thành công của HTTP thật rút gọn thành "N TIM CMT <cid>"
+    # hoặc "OK TIM CMT <cid>" khi không đọc lại được số like. Mock phải
+    # ghi rõ "MÔ PHỎNG TIM CMT <cid>", tuyệt đối không bịa số like.
     import re as _re
-    pat = _re.compile(r"^\d+ TIM CMT \d+$")
+    pat = _re.compile(r"^(?:\d+|OK|MÔ PHỎNG) TIM CMT \d+$")
     ok_all = all(pat.match(n or "") for n in notes)
-    check("moi tai khoan co ghi chu 'N TIM CMT <cid>'", ok_all, True)
+    check("moi tai khoan co ghi chu '... TIM CMT <cid>'", ok_all, True)
+    check("mock khong in so like bia",
+          all(not _re.match(r"^\d+ TIM CMT", n or "") for n in notes), True)
     check("tai khoan cuoi cung OK",
           all(a.status in ("✔ Thành công",) or a.status for a in accounts), True)
 

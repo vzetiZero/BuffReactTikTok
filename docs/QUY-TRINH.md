@@ -69,11 +69,18 @@ Mỗi account ở chế độ `like_cid`:
 → **2–4 chữ ký / account.** Các phần này đều I/O-bound nên thread scale gần tuyến tính.
 Trần thực tế do sidecar đặt ra, không phải do Python.
 
+Đo thực tế ngày 19/10/2026, sidecar Windows Chrome 144, 10 account / 10 luồng,
+CID `7697215876224303888`: **1,69 giây** (~5,9 account/s, ~11,8 chữ ký/s) khi pool
+đã ấm. Lần chạy ngay sau khi sidecar xoay identity (định kỳ 30 phút) mất 30,23 giây;
+đó là chi phí khởi tạo pool, không phải tốc độ ổn định.
+
 ### 2.3. Lập lịch tài khoản và backend mặc định
 
-Backend mặc định là `http`. Cấu hình cũ từng lưu `mock` sẽ được chuyển về `http`
-một lần khi mở ứng dụng; nếu người dùng chủ động chọn `mock` sau đó, lựa chọn đó
-được giữ lại.
+GUI chỉ còn backend `http` thật. Cấu hình cũ lưu `mock` bị ép về `http` cả khi
+khởi động lẫn ngay trước mỗi lượt chạy, nên không còn chuyện chạy 764 account
+mà thực ra chỉ mô phỏng. `MockBackend` chỉ được dùng trong test tự động
+(`test_cid_queue.py`, `test_inflight.py`) bằng cách gán thẳng
+`controller._factory`; nó không xuất hiện trong giao diện.
 
 Mỗi lượt chạy đưa toàn bộ tài khoản đã chọn vào `QThreadPool`. Pool giữ tối đa số
 luồng đã đặt và tự bắt đầu tài khoản đang chờ tiếp theo ngay khi một luồng rảnh;
@@ -144,28 +151,37 @@ chéo, thiếu hoặc sai một là request bị từ chối:
 |---|---|---|
 | **Ngôn ngữ** | `app_language` = `browser_language` = `language` = `webcast_language`, và phải khớp tài khoản | `store-country-code=vn` → `vi-VN` |
 | **Nền tảng** | `os` = `windows` ⇔ `browser_platform` = `Win32`, phải suy ra từ UA của sidecar | `_os_family(ua)` |
-| **Phiên bản** | `browser_version` chứa đúng số Chrome trong UA | `_chrome_version(ua)` |
+| **Phiên bản** | `browser_version` = UA bỏ tiền tố `Mozilla/` (Chrome/144, Chrome/150, …) | UA sidecar |
 | **Múi giờ / vùng** | `tz_name` + `region` + `priority_region` khớp cookie | `Asia/Bangkok` + `VN` |
 
-Hai chi tiết dễ sai đã sửa:
+Các chi tiết dễ sai đã sửa:
 
-- **`verifyFp`** chính là cookie `s_v_web_id` (dạng `verify_xxx_yyy…`). Trước đây thiếu.
-- **Header CSRF** tên đúng là `tt-csrf-token`, không phải `x-csrf-token` (cái sau bị bỏ qua).
-  Ngoài ra `Referer` là **trang chủ theo locale** (`https://www.tiktok.com/vi-VN/`),
-  không phải URL video.
+- **`verifyFp`** chính là cookie `s_v_web_id` (dạng `verify_xxx_yyy…`).
+- **Header CSRF** tên đúng là `tt-csrf-token`, không phải `x-csrf-token`.
+- **`Referer`**: request thật gửi **URL video đang mở**, không phải trang chủ. App dùng
+  URL video khi có `aweme_id`/`video`; chỉ fallback về trang chủ khi thiếu.
+- **POST like**: body rỗng nhưng vẫn có `Content-Type: application/x-www-form-urlencoded`
+  và `Content-Length: 0`; app gửi `data=b""` thay vì không gửi body.
+- **`history_len`** của request mẫu mới là `7` (trước là `8`).
+- **Client Hints**: với UA Chrome, app gửi `sec-ch-ua`, `sec-ch-ua-mobile`,
+  `sec-ch-ua-platform` cho khớp; nếu đổi UA sang Safari thì không gửi.
+- **Sidecar**: giả lập **Windows Chrome 144** (`navigator.platform=Win32`,
+  viewport 1920×1080). Python lấy đúng UA này để dựng `browser_version`,
+  `os`, `browser_platform` và client hints — không hard-code.
 
 `device_id` và `odinId` trên web là **số bão hòa 19 chữ số**. File cookie của bạn lưu
-`device_id` dạng UUID (`9e5f94bc-e8a4-…`) — gửi UUID đi sẽ bị từ chối. Vì vậy
-`_numeric_id()` chỉ nhận giá trị đúng kiểu số, còn lại bỏ trống để TikTok tự sinh.
-Thiếu 2 tham số này vẫn chạy; gửi sai thì fail.
+`device_id` dạng UUID (`9e5f94bc-e8a4-…`) — gửi UUID đi sẽ bị từ chối. App dùng số thật
+nếu cookie/file có, không thì suy ra ổn định từ `sessionid`. Thiếu hoặc sai 2 tham số này
+có thể bị `10221` hoặc HTTP 200 body rỗng. Muốn khớp 100% request thật, nên bổ sung
+`device_id`/`odinId` thật cho từng tài khoản.
 
-Chạy `python test_digg_url.py` để so 27 tham số với request thật của bạn.
+Chạy `python test_digg_url.py` để so các tham số với request thật của bạn.
 
 ---
 
-## 3.3. Ba chữ ký trong URL
+## 3.3. Các chữ ký trong URL
 
-Request thật có **ba** tham số chữ ký, không phải hai:
+Request thật của trình duyệt có **ba** tham số chữ ký:
 
 | Tham số | Giá trị trong request của bạn | Ý nghĩa |
 |---|---|---|
@@ -173,9 +189,11 @@ Request thật có **ba** tham số chữ ký, không phải hai:
 | `X-Gnarly` | `MCeokLHWFSX14lJ…` | Chữ ký chính (ChaCha-XOR + TLV) |
 | `X-Dynosaur` | `M8ln-splcyYynbdZO/…` | Chữ ký phụ |
 
-Cả ba đều do sidecar sinh. Ứng dụng **không tự dịch** bất kỳ chữ ký nào — chỉ gửi URL
-trần cho sidecar và dùng lại `signed_url` trả về. Nếu TikTok đổi thuật toán, chỉ cần
-cập nhật sidecar, không phải sửa code Python.
+Sidecar `carcabot/tiktok-signature` hiện chỉ trả `X-Bogus` + `X-Gnarly`, **không có
+`X-Dynosaur`**. Thực tế `comment/digg` vẫn chấp nhận request thiếu `X-Dynosaur` (đã test
+10/10 tài khoản), nên app dùng `signed_url` của sidecar và không tự dịch chữ ký. Nếu cần
+khớp 100% request trình duyệt (đặc biệt cho `user/detail` hoặc `comment/list`), phải dùng
+sidecar/SDK mới hơn có sinh thêm `X-Dynosaur`.
 
 ---
 
@@ -272,7 +290,7 @@ GUI) — hai lần lock mỗi request, không đáng kể so với network.
 | 9 | Trả lời bình luận | `core/tiktok.py` | `publish/` + fallback `publish/async/` |
 | 10 | Xác minh số like trước/sau | `core/backends/http_backend.py` | Phát hiện trường hợp đã thả tim rồi |
 | 11 | Client sidecar ký | `core/signer.py` | `/health`, `/signature`, `/restart`, cache navigator |
-| 12 | Backend giả lập | `core/backends/mock_backend.py` | Test GUI + đa luồng không cần mạng |
+| 12 | Backend giả lập | `core/backends/mock_backend.py` | Chỉ test tự động; không xuất hiện trong GUI |
 | 13 | Giao diện 4 tab + form CID | `ui/main_window.py` | Quản lý / Tác vụ / Chi tiết / Cài đặt |
 | 13a | Style chung | `ui/style.py` | Bảng, nút, tab, nhật ký — màu navy/đỏ/xanh |
 | 13b | Panel chi tiết | `ui/detail_panel.py` | Thẻ bài viết, thẻ tài khoản, thẻ tổng quan |
@@ -282,7 +300,7 @@ GUI) — hai lần lock mỗi request, không đáng kể so với network.
 | 17 | **Proxy per-account** | `core/runner.py` | Task đọc `account.proxy`; đổi proxy khi bị chặn IP |
 | 18 | **Lưu cấu hình** | `core/settings.py` | JSON, tự lưu khi đóng app |
 | 19 | **Cầu nối luồng** | `core/gui_bridge.py` | Đưa callback từ thread nền về GUI thread |
-| 20 | **Fingerprint khớp DevTools** | `core/tiktok.py` | Ngôn ngữ từ cookie, `verifyFp`, `history_len=8`, header `tt-csrf-token` |
+| 20 | **Fingerprint khớp DevTools** | `core/tiktok.py` | Ngôn ngữ từ cookie, `verifyFp`, `browser_version` theo UA, `history_len=7`, `Referer` video, header `tt-csrf-token` |
 | 21 | Test proxy | `test_proxy.py` | 25/25 PASS |
 | 22 | Test URL digg | `test_digg_url.py` | So 27 tham số với request thật → HỢP LỆ |
 | 23 | Tìm kiếm / lọc / sắp xếp | `core/models.py` | 8 bộ lọc, sắp xếp 3 kiểu, cache chuỗi, gõ trễ 250ms |
@@ -297,8 +315,8 @@ GUI) — hai lần lock mỗi request, không đáng kể so với network.
 
 | # | Hạng mục | Mục tiêu | Vướng |
 |---|---|---|---|
-| 1 | Tích hợp sidecar thật | Chạy `npm start`, xác nhận `status_code: 0` | Chưa có Node trong máy dev — đây là bước chặn duy nhất còn lại |
-| 2 | Xác minh số like | Đọc `digg_count` sau khi thả tim | Cần request xác minh; mỗi lần = 2–4 chữ ký, tốn gấp đôi |
+| 1 | Tích hợp sidecar thật | Chạy `npm start`, xác nhận `status_code: 0` | **Đã chạy**: Node + sidecar Windows Chrome 144, 10/10 like thật được chấp nhận |
+| 2 | Xác minh số like | Đọc `digg_count` sau khi thả tim | `comment_list` chạy khi đúng `aweme_id`; cần quét đủ trang hoặc có URL video. `user_detail` vẫn trả `10221` với lô account test |
 | 3 | Cấu hình `device_id` / `odinId` | Cho phép nhập tay 2 số này | File cookie lưu UUID ở `device_id`, web cần số bão hòa 19 chữ số |
 
 ### 4.3. CHƯA LÀM ⬜

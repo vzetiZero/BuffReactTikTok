@@ -48,7 +48,13 @@ class Signer:
         try:
             r = self._session().get(f"{self.base_url}/health", timeout=timeout)
             r.raise_for_status()
-            return r.json()
+            data = r.json()
+            # Sidecar có thể đã restart và đổi UA (Safari -> Windows Chrome).
+            # /health trả UA hiện tại; cập nhật cache để client mới khỏi lệch.
+            ua = data.get("userAgent")
+            if ua:
+                self._cache_navigator({"user_agent": ua})
+            return data
         except Exception as e:
             raise SignerError(f"không gọi được sidecar tại {self.base_url}: {e}") from e
 
@@ -92,7 +98,11 @@ class Signer:
         if not nav:
             return
         with self._nav_lock:
-            if self._navigator is None:
+            # Cập nhật nếu sidecar đổi UA (ví dụ restart để đổi Safari -> Chrome).
+            # Nếu giữ UA cũ, browser_version/os sẽ lệch với chữ ký mới.
+            old_ua = (self._navigator or {}).get("user_agent")
+            new_ua = nav.get("user_agent")
+            if self._navigator is None or (new_ua and new_ua != old_ua):
                 self._navigator = dict(nav)
 
     def navigator(self) -> dict:

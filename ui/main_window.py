@@ -71,7 +71,7 @@ from core.models import (
     AccountTableModel,
     format_success_line,
 )
-from core.parser import load_accounts
+from core.parser import extract_aweme_id, load_accounts
 from core.proxy import GatewayConfig, ProxyPool
 from core.runner import RunController
 from core.settings import (
@@ -226,6 +226,7 @@ class MainWindow(QMainWindow):
         # Khôi phục tham số tab Tác vụ TRƯỚC, để _restore_accounts và các
         # hàm sau thấy đúng giá trị người dùng đã chọn.
         self._restore_task_params()
+        self._log("head", "Backend: http — gửi request TikTok thật", "head")
         self._restore_accounts()
         if self.settings.proxy_auto_check and self.proxy_pool.has_any():
             self.tabs.setCurrentWidget(self.tab_settings)
@@ -1132,6 +1133,21 @@ class MainWindow(QMainWindow):
         )
         ft.addRow("Danh sách cid:", self.in_cid)
 
+        # Video URL là TÙY CHỌN nhưng rất nên có: request thật gửi
+        # `aweme_id` + Referer = URL video, và chỉ khi có aweme_id thì nút
+        # "Kiểm tra lại like" mới đọc được số like sau khi thả tim.
+        self.in_video = QLineEdit()
+        self.in_video.setPlaceholderText(
+            "https://www.tiktok.com/@user/video/7690908625404955910  (tùy chọn)"
+        )
+        self.in_video.setClearButtonEnabled(True)
+        self.in_video.setToolTip(
+            "Dán URL video chứa bình luận. App lấy aweme_id từ URL để gửi\n"
+            "kèm request like và dùng chính URL này làm Referer — giống\n"
+            "request thật trong DevTools. Bỏ trống vẫn thả tim được bằng cid."
+        )
+        ft.addRow("Video URL:", self.in_video)
+
         # Hàng thông báo: bao nhiêu cid hợp lệ, đang ở cid nào.
         self.lbl_cid_stat = QLabel("")
         self.lbl_cid_stat.setProperty("role", "hint")
@@ -1243,8 +1259,11 @@ class MainWindow(QMainWindow):
         gsv.addRow("Sidecar ký:", self.in_signer)
 
         self.backend_kind = QComboBox()
-        self.backend_kind.addItem("http (khuyên dùng — nhanh)", "http")
-        self.backend_kind.addItem("mock (chỉ test giao diện)", "mock")
+        # GUI chỉ có backend THẬT. Mock từng được để trong combo và đã gây
+        # hiểu nhầm: người dùng chạy 764 account, thấy "thành công" nhưng
+        # TikTok không nhận request nào. Test tự động vẫn dùng MockBackend
+        # bằng cách gán controller._factory (xem test_cid_queue.py).
+        self.backend_kind.addItem("http — gửi request TikTok thật", "http")
         gsv.addRow("Backend:", self.backend_kind)
         v.addWidget(gs)
 
@@ -1388,9 +1407,11 @@ class MainWindow(QMainWindow):
         i = self.cb_mode.findData(s.mode)
         if i >= 0:
             self.cb_mode.setCurrentIndex(i)
-        i = self.backend_kind.findData(s.backend_kind)
-        if i >= 0:
-            self.backend_kind.setCurrentIndex(i)
+
+        # GUI luôn dùng HTTP thật. Nếu settings cũ còn "mock" (do bản trước
+        # đã lưu), ghi đè ngay — không để người dùng chạy nhầm lần nữa.
+        self.settings.backend_kind = "http"
+        self.backend_kind.setCurrentIndex(self.backend_kind.findData("http"))
 
         self._update_thread_hint(self.sp_threads.value())
         self._refresh_pick_stat()
@@ -1675,11 +1696,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     def _collect_cfg(self, cid: str = "") -> RunConfig:
         """ Gom tham số chạy. `cid` ghi đè để chạy tiếp cid kế tiếp. """
+        video = self.in_video.text().strip()
+        aweme_id = extract_aweme_id(video) if video else ""
         return RunConfig(
             mode=self.cb_mode.currentData(),
             cid=cid or (self.cids()[0] if self.cids() else ""),
-            aweme_id="",                # cố tình bỏ — xem _build_task
-            video="",
+            aweme_id=aweme_id,
+            video=video,
             comment="",
             search_keyword="",
             target_text="",
@@ -1831,6 +1854,9 @@ class MainWindow(QMainWindow):
                 self.cb_mode.setCurrentIndex(i)
 
         self._sync_from_settings_tab()
+        # GUI chỉ có một backend: HTTP thật. Ép lại ngay trước khi chạy.
+        self.backend_kind.setCurrentIndex(
+            self.backend_kind.findData("http"))
         # Gom danh sách cid TRƯỚC, rồi chạy lần lượt từng cid.
         lst = self.cids()
         good, bad = self.parse_cids(self.in_cid.toPlainText())
@@ -1903,7 +1929,8 @@ class MainWindow(QMainWindow):
                        "     cửa sổ mới.\n")
                     + f"  2. Sau đó {SIGNER_STEP_RUN}\n"
                     "  3. Quay lại app, bấm 'Kiểm tra lại' ở thanh dưới.\n\n"
-                    "Chưa muốn cài Node? Chọn Backend = mock để xem thao tác chạy."
+                    "App chỉ chạy thật, không có chế độ mô phỏng. Cần Node.js "
+                    "để sidecar ký request."
                 )
             else:
                 box.setText(
@@ -1915,7 +1942,8 @@ class MainWindow(QMainWindow):
                     "Cách sửa:\n"
                     + SIGNER_STEPS
                     + "  3. Quay lại đây, bấm nút 'Kiểm tra lại' ở thanh dưới.\n\n"
-                    "Muốn chỉ xem thao tác chạy thì chọn Backend = mock."
+                    "App chỉ chạy thật; không có chế độ mô phỏng. Hãy bật "
+                    "sidecar rồi chạy lại."
                 )
             # QMessageBox dùng StandardButton CỦA NÓ, không phải của
             # QDialogButtonBox — trộn hai enum này sẽ vỡ ngay khi bấm CHẠY
@@ -1972,6 +2000,7 @@ class MainWindow(QMainWindow):
         if total > 1:
             head += f"   [{self._cid_pos + 2} cid chờ]"
         self._log("head", f"{head} · {n} account · {cfg.concurrency} luồng", "head")
+        self._log("head", "   backend: http — GỬI REQUEST TIKTOK THẬT", "head")
         if not cfg.use_proxy_pool:
             self._log("head", "   đường ra: tất cả qua IP máy (tắt proxy)", "head")
         elif n_own == n:
