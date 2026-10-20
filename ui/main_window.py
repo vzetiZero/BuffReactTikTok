@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialogButtonBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -74,7 +73,7 @@ from core.models import (
     format_success_line,
 )
 from core.parser import extract_aweme_id, load_accounts
-from core.proxy import GatewayConfig, ProxyPool
+from core.proxy import GatewayConfig, ProxyPool, proxy_display
 from core.sidecar_pool import SidecarPool, find_node_exe
 from core.runner import RunController
 from core.settings import (
@@ -82,6 +81,7 @@ from core.settings import (
     default_path,
     load_accounts_cache,
     save_accounts_cache,
+    save_cookie_file_path,
 )
 from .delegates import AccountCellDelegate
 from .account_picker import AccountPickerDialog
@@ -186,7 +186,7 @@ class MainWindow(QMainWindow):
         self.accounts: list = []
         self.controller = RunController(
             lambda: build_backend(
-                self.backend_kind.currentData(),
+                "http",
                 proxy_pool=self.proxy_pool,
                 rotate_on_block=self.settings.rotate_on_block,
                 signer_pool=self.signer_pool,
@@ -195,7 +195,8 @@ class MainWindow(QMainWindow):
             rotate_on_block=self.settings.rotate_on_block,
         )
         # Bộ kiểm tra sức khoẻ tài khoản (chuột phải → Kiểm tra trạng thái)
-        self.checker = HealthChecker(self.settings, parent=self)
+        self.checker = HealthChecker(self.settings, parent=self,
+                                     signer_pool=self.signer_pool)
         self.checker._on_applied = self._apply_health
         self.checker.log.connect(self._on_log)
         self._progress: dict[str, int] = {}
@@ -264,13 +265,11 @@ class MainWindow(QMainWindow):
     def _restore_accounts(self) -> None:
         """Mở app lần sau: tự nạp lại tài khoản đã lưu, khỏi bấm 'Nạp cookie'.
 
-        Ưu tiên đọc lại FILE GỐC nếu vẫn còn, vì file đó luôn mới hơn bản nhớ.
-        Chỉ khi file biến mất (đổi máy, xoá nhầm) mới dùng bản nhớ.
+        Ưu tiên đọc lại FILE GỐC theo đường dẫn đã lưu nếu file đó vẫn còn,
+        vì file đó luôn mới hơn bản nhớ. Chỉ khi file biến mất (đổi máy, xoá
+        nhầm) mới dùng bản nhớ — và bản nhớ thì mới phụ thuộc
+        `remember_accounts`.
         """
-        if not self.settings.remember_accounts:
-            self._log("head", "Nhấn 'Nạp cookie' ở thanh công cụ để bắt đầu.", "head")
-            return
-
         src = self.settings.last_cookie_file
         if src and Path(src).exists():
             try:
@@ -283,6 +282,10 @@ class MainWindow(QMainWindow):
                     self._log("head", "Đã tự nạp lại tài khoản từ lần trước.",
                               "head")
                     return
+        if not self.settings.remember_accounts:
+            self._log("head", "Nhấn 'Nạp cookie' ở thanh công cụ để bắt đầu.", "head")
+            return
+
         cached = load_accounts_cache()
         if cached:
             self._apply_accounts(cached, "bộ nhớ của phiên trước")
@@ -713,19 +716,39 @@ class MainWindow(QMainWindow):
         # báo "sidecar đã dừng" — rất dễ gây hiểu nhầm là app hỏng.
         from core.signer import Signer
         try:
-            already = Signer(self.in_signer.text().strip()).health()
+            already = Signer(self.settings.signer_url).health()
         except Exception:
             already = None
-        if already and already.get("ready"):
-            self._signer_ready = True
-            self.lbl_signer.setText(
-                f"sidecar ✓ {already.get('generationCount', 0)} chữ ký")
-            self.lbl_signer.setProperty("role", "hint")
-            self._style_signer_label()
-            self._log("signer",
-                      "Sidecar ký đã chạy sẵn (có thể do bạn mở "
-                      f"{SIGNER_SCRIPT} ở cửa sổ khác) — dùng luôn, không "
-                      "cần bật thêm. Bạn có thể bấm CHẠY ngay.", "ok")
+        if already:
+            if already.get("ready"):
+                self._signer_ready = True
+                self.lbl_signer.setText(
+                    f"sidecar ✓ {already.get('generationCount', 0)} chữ ký")
+                self.lbl_signer.setProperty("role", "hint")
+                self._style_signer_label()
+                self._log("signer",
+                          "Sidecar ký đã chạy sẵn (có thể do bạn mở "
+                          f"{SIGNER_SCRIPT} ở cửa sổ riêng) — dùng luôn, không "
+                          "cần bật thêm. Bạn có thể bấm CHẠY ngay.", "ok")
+                return
+            # Sidecar CÒN SỐNG nhưng chưa sẵn sàng (đang tải trình duyệt
+            # lần đầu). Bật thêm sẽ chết ngay vì không bind được cổng 8080,
+            # rồi app báo "sidecar đã dừng" — rất dễ hiểu nhầm là app hỏng.
+            self._log(
+                "signer",
+                "Sidecar ký đã chạy nhưng CHƯA sẵn sàng (đang tải trình "
+                "duyệt lần đầu). Không bật thêm để tránh tranh cổng 8080. "
+                "Chờ 30-60 giây rồi bấm 'Kiểm tra lại'.",
+                "warn",
+            )
+            QMessageBox.information(
+                self, "Sidecar đang khởi động",
+                "Sidecar ký đã chạy nhưng chưa sẵn sàng.\n\n"
+                "Lần đầu phải tải trình duyệt nên mất 30-60 giây ( lâu hơn nếu "
+                "mạng chậm).\n\n"
+                "KHÔNG bật thêm — chỉ có một sidecar được bind cổng 8080.\n"
+                "Chờ xong rồi bấm 'Kiểm tra lại' ở thanh dưới, rồi bấm CHẠY.",
+            )
             return
 
         script = SIGNER_SCRIPT
@@ -828,7 +851,7 @@ class MainWindow(QMainWindow):
         self._signer_wait += 1
         from core.signer import Signer
         try:
-            info = Signer(self.in_signer.text().strip()).health()
+            info = Signer(self.settings.signer_url).health()
         except Exception:
             info = None
         if info and info.get("ready"):
@@ -1018,7 +1041,7 @@ class MainWindow(QMainWindow):
                 return
             local_only = True
 
-        use_proxy = self.cb_pool.isChecked() and not local_only
+        use_proxy = not local_only
         for a in accounts:
             a.health, a.health_note = HC_CHECKING, ""
         self.model._refresh_page()
@@ -1186,129 +1209,11 @@ class MainWindow(QMainWindow):
         ft.addRow("", self.lbl_cid_stat)
         v.addWidget(gb_t)
 
-        # --- nhóm: tốc độ ---
-        gb_s = QGroupBox("Tốc độ  (nhiều luồng = nhanh hơn, cho đến khi chạm trần)")
-        fs = QFormLayout(gb_s)
-        fs.setContentsMargins(10, 6, 10, 10)
-        fs.setHorizontalSpacing(8)
-        fs.setVerticalSpacing(5)
-        fs.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-
-        self.sp_threads = QSpinBox()
-        self.sp_threads.setRange(1, 500)
-        # Nạp lại giá trị đã lưu, KHÔNG cứng 10. Trước đây setValue(10)
-        # khiến người dùng đổi xong bấm CHẠY lại bị nhảy về 10 — và bản
-        # ghi trong settings.json cũng không bao giờ được cập nhật.
-        self.sp_threads.setValue(self.settings.concurrency)
-        self.sp_threads.setFixedWidth(92)
-        self.sp_threads.setToolTip(
-            "Tốc độ gần như tuyến tính theo số luồng.\n"
-            "Nên để <= số nhân của CPU × 3.\n"
-            "Trần thật là sidecar (~360 tài khoản/phút), thêm luồng vượt\n"
-            "trần chỉ tốn RAM mà không nhanh hơn — cần proxy xoay IP mới tăng."
-        )
-        fs.addRow("Số luồng:", self.sp_threads)
-
-        # Gợi ý nhanh theo máy, tránh phải tự nhớ trần.
-        self.lbl_thread_hint = QLabel("")
-        self.lbl_thread_hint.setProperty("role", "hint")
-        self.lbl_thread_hint.setWordWrap(True)
-        fs.addRow("", self.lbl_thread_hint)
-
-        # 2 spinbox cạnh nhau, nhãn "→" nằm GIỮA và cố định bề rộng
-        delay = QWidget()
-        dh = QHBoxLayout(delay)
-        dh.setContentsMargins(0, 0, 0, 0)
-        dh.setSpacing(4)
-        self.sp_dmin = QDoubleSpinBox()
-        self.sp_dmax = QDoubleSpinBox()
-        for sp in (self.sp_dmin, self.sp_dmax):
-            sp.setRange(0, 300)
-            sp.setSingleStep(0.5)
-            sp.setSuffix(" s")
-            sp.setFixedWidth(92)
-        self.sp_dmax.setValue(1.0)
-        arr = QLabel("→")
-        arr.setFixedWidth(14)
-        arr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        arr.setProperty("role", "hint")
-        dh.addWidget(self.sp_dmin)
-        dh.addWidget(arr)
-        dh.addWidget(self.sp_dmax)
-        dh.addStretch(1)
-        fs.addRow("Trễ ngẫu nhiên:", delay)
-
-        self.sp_retry = QSpinBox()
-        self.sp_retry.setRange(0, 5)
-        self.sp_retry.setFixedWidth(92)
-        self.sp_retry.setToolTip("Số lần thử lại khi lỗi hoặc bị chặn IP")
-        fs.addRow("Thử lại:", self.sp_retry)
-
-        self.cb_verify = QCheckBox("Đọc lại comment để xác minh số like")
-        self.cb_verify.setChecked(True)
-        self.cb_verify.setToolTip(
-            "Tắt đi sẽ nhanh gấp đôi, nhưng không biết thả tim có thành công không"
-        )
-        fs.addRow("", self.cb_verify)
-        v.addWidget(gb_s)
-
-        # --- nhóm đường ra ---
-        gp = QGroupBox("Đường ra  (proxy cho tài khoản chưa được gán ở tab Cài đặt)")
-        gpv = QFormLayout(gp)
-        gpv.setContentsMargins(10, 6, 10, 10)
-        gpv.setHorizontalSpacing(8)
-        gpv.setVerticalSpacing(5)
-        gpv.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-
-        self.cb_pool = QCheckBox("Dùng proxy gán ở tab Cài đặt")
-        self.cb_pool.setChecked(True)
-        self.cb_pool.setToolTip(
-            "Tắt để chạy thẳng ra IP máy (nhanh hơn nhưng dễ bị TikTok nhận diện)."
-        )
-        gpv.addRow("Nguồn:", self.cb_pool)
-
-        self.in_proxy = QLineEdit()
-        self.in_proxy.setPlaceholderText(
-            "để trống = dùng proxy hệ thống (nếu đã bật ở Cài đặt)"
-        )
-        gpv.addRow("Dự phòng:", self.in_proxy)
-
-        self.lbl_proxy = QLabel("—")
-        self.lbl_proxy.setProperty("role", "hint")
-        self.lbl_proxy.setWordWrap(True)
-        gpv.addRow("Tình trạng:", self.lbl_proxy)
-        v.addWidget(gp)
-
-        # --- nhóm lệnh ---
-        gs = QGroupBox("Lệnh")
-        gsv = QFormLayout(gs)
-        gsv.setContentsMargins(10, 6, 10, 10)
-        gsv.setHorizontalSpacing(8)
-        gsv.setVerticalSpacing(5)
-        gsv.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        self.in_signer = QLineEdit("http://127.0.0.1:8080")
-        gsv.addRow("Sidecar ký:", self.in_signer)
-
-        self.backend_kind = QComboBox()
-        # GUI chỉ có backend THẬT. Mock từng được để trong combo và đã gây
-        # hiểu nhầm: người dùng chạy 764 account, thấy "thành công" nhưng
-        # TikTok không nhận request nào. Test tự động vẫn dùng MockBackend
-        # bằng cách gán controller._factory (xem test_cid_queue.py).
-        self.backend_kind.addItem("http — gửi request TikTok thật", "http")
-        gsv.addRow("Backend:", self.backend_kind)
-        v.addWidget(gs)
-
+        # --- nhóm tốc độ / đường ra / lệnh: đã bỏ khỏi UI ---
+        # Số luồng, trễ ngẫu nhiên, số lần thử lại, xác minh like, nguồn
+        # proxy, proxy dự phòng, sidecar ký và backend đều lấy thẳng từ
+        # settings (đọc trong _collect_cfg) — không còn ô để sửa.
         v.addStretch(1)
-
-        h = QHBoxLayout()
-        h.addStretch(1)
-        self.btn_dry = QPushButton("Thử 1 tài khoản")
-        self.btn_dry.setToolTip(
-            "Chạy đúng 1 account để kiểm tra tham số trước khi chạy cả đàn"
-        )
-        self.btn_dry.clicked.connect(lambda: self.start_run(dry_run=True))
-        h.addWidget(self.btn_dry)
-        v.addLayout(h)
         return box
 
     def _build_log(self) -> QWidget:
@@ -1350,7 +1255,6 @@ class MainWindow(QMainWindow):
         self.btn_run.clicked.connect(self.start_run)
         self.btn_stop.clicked.connect(self.on_stop)
         self.in_cid.textChanged.connect(self._on_cid_text_changed)
-        self.cb_pool.toggled.connect(self._refresh_proxy_label)
         self.tab_settings.log.connect(self._on_settings_log)
         self.tab_settings.proxies_ready.connect(self._on_proxies_ready)
 
@@ -1361,17 +1265,8 @@ class MainWindow(QMainWindow):
         self.rb_pick_order.toggled.connect(lambda *_: self._refresh_pick_stat())
         self.rb_pick_random.toggled.connect(lambda *_: self._refresh_pick_stat())
 
-        # Mọi tham số chạy ở tab Tác vụ đều lưu NGAY khi đổi, không đợi
-        # bấm CHẠY — nếu chỉ lưu lúc chạy thì đóng app ở giữa chừng thì
-        # mất, và người dùng phải chạy thử mới biết đã lưu chưa.
-        self.sp_threads.valueChanged.connect(self._on_threads_changed)
-        self.sp_retry.valueChanged.connect(lambda v: self._save_param(
-            "retries", v))
-        self.sp_dmin.valueChanged.connect(lambda v: self._save_param(
-            "delay_min", v))
-        self.sp_dmax.valueChanged.connect(lambda v: self._save_param(
-            "delay_max", v))
-        self.cb_verify.toggled.connect(lambda v: self._save_param("verify", v))
+        # Tham số chạy còn lại lưu NGAY khi đổi, không đợi bấm CHẠY —
+        # nếu chỉ lưu lúc chạy thì đóng app ở giữa chừng thì mất.
         self.sp_pick.valueChanged.connect(lambda v: self._save_param(
             "pick_limit", v))
         self.rb_pick_random.toggled.connect(
@@ -1380,12 +1275,6 @@ class MainWindow(QMainWindow):
                 else AccountTableModel.PICK_ORDER)))
         self.cb_mode.currentIndexChanged.connect(
             lambda _i: self._save_param("mode", self.cb_mode.currentData()))
-        self.in_signer.editingFinished.connect(
-            lambda: self._save_param("signer_url", self.in_signer.text().strip()))
-        self.backend_kind.currentIndexChanged.connect(
-            lambda _i: self._save_param("backend_kind",
-                                        self.backend_kind.currentData()))
-        self._update_thread_hint(self.sp_threads.value())
 
         # đổi trang -> cập nhật nhãn đếm
         self.model.modelReset.connect(self._on_model_reset)
@@ -1406,18 +1295,14 @@ class MainWindow(QMainWindow):
         Trước đây mọi ô đều về mặc định (10 luồng, 1 trễ, 1 retry…): sửa
         xong đóng app là mất trắng. Nay mỗi ô ghi vào settings ngay khi
         đổi (xem _connect), và hàm này đọc lại khi khởi động.
+
+        Số luồng / trễ / số lần thử lại / xác minh like / sidecar ký đã
+        bỏ khỏi UI: chúng lấy thẳng từ settings nên không cần khôi phục.
         """
         s = self.settings
         # blockSignals vì widget đã nối valueChanged -> _save_param; nếu
         # không, mỗi ô sẽ ghi lại settings một lần lúc khởi động.
         for widget, value, setter in (
-            (self.sp_threads, s.concurrency, lambda w, v: w.setValue(v)),
-            (self.sp_retry, s.retries, lambda w, v: w.setValue(v)),
-            (self.sp_dmin, s.delay_min, lambda w, v: w.setValue(v)),
-            (self.sp_dmax, s.delay_max, lambda w, v: w.setValue(v)),
-            (self.cb_verify, s.verify, lambda w, v: w.setChecked(v)),
-            (self.in_signer, s.signer_url,
-             lambda w, v: w.setText(v or "http://127.0.0.1:8080")),
             (self.sp_pick, s.pick_limit, lambda w, v: w.setValue(v)),
         ):
             widget.blockSignals(True)
@@ -1442,9 +1327,7 @@ class MainWindow(QMainWindow):
         # GUI luôn dùng HTTP thật. Nếu settings cũ còn "mock" (do bản trước
         # đã lưu), ghi đè ngay — không để người dùng chạy nhầm lần nữa.
         self.settings.backend_kind = "http"
-        self.backend_kind.setCurrentIndex(self.backend_kind.findData("http"))
 
-        self._update_thread_hint(self.sp_threads.value())
         self._refresh_pick_stat()
 
     def _on_settings_log(self, message: str, level: str) -> None:
@@ -1456,7 +1339,6 @@ class MainWindow(QMainWindow):
             self.signer_pool.reset()
         self.model._refresh_page()
         self._refresh_pager()
-        self._refresh_proxy_label()
         self._log(
             "cài đặt",
             f"Đã gán {count} proxy cho {sum(1 for a in self.accounts if a.proxy)} account.",
@@ -1513,33 +1395,6 @@ class MainWindow(QMainWindow):
             f"Sẽ chạy {limit} tài khoản ({how.lower()}) trong "
             f"{ticked} tài khoản đã tick."
         )
-
-    def _refresh_proxy_label(self) -> None:
-        pool = self.proxy_pool
-        n = len(self.accounts)
-        n_assigned = sum(1 for a in self.accounts if a.proxy)
-
-        if not self.cb_pool.isChecked():
-            self.lbl_proxy.setText("Đang bỏ qua proxy — chạy bằng IP máy.")
-            return
-
-        parts = []
-        if pool.has_any():
-            n_ok = sum(1 for p in pool.items if p.ok)
-            n_total = len(pool.items)
-            extra = f" · sống {n_ok}/{n_total}" if n_ok else ""
-            parts.append(
-                f"gán {n_assigned}/{n} account · chế độ {pool.mode}{extra}"
-            )
-        else:
-            parts.append("chưa gán proxy nào")
-
-        if n_assigned < n and self.settings.use_system_proxy:
-            sysp = self.settings.system_proxy or "chưa phát hiện"
-            parts.append(f"{n - n_assigned} account dùng proxy hệ thống ({sysp})")
-        elif n_assigned < n:
-            parts.append(f"{n - n_assigned} account dùng IP máy")
-        self.lbl_proxy.setText(" · ".join(parts))
 
     # ------------------------------------------------------------------ #
     # Danh sách cid
@@ -1606,7 +1461,7 @@ class MainWindow(QMainWindow):
 
         self._signer_ready = False
         try:
-            info = Signer(self.in_signer.text().strip()).health()
+            info = Signer(self.settings.signer_url).health()
         except SignerError as e:
             self._signer_fail(e)
             return
@@ -1688,8 +1543,15 @@ class MainWindow(QMainWindow):
             return
 
         self._apply_accounts(accounts, f"file {Path(path).name}")
-        # Ghi lại để lần sau mở app khỏi phải nạp lại.
+        # Ghi lại để lần sau mở app khỏi phải nạp lại. Lưu NGAY vào đĩa
+        # (không đợi đóng app) — nếu app bị tắt đột ngột thì đường dẫn vẫn
+        # còn, mở lại là tự nạp, khỏi bấm 'Nạp cookie' lần nữa.
         self.settings.last_cookie_file = str(path)
+        try:
+            cfg_path = save_cookie_file_path(path)
+            self._log("head", f"Đã nhớ đường dẫn file cookie: {cfg_path}", "head")
+        except OSError as e:
+            self._log("head", f"Không lưu được đường dẫn file cookie: {e}", "warn")
         if self.settings.remember_accounts:
             try:
                 p = save_accounts_cache(accounts)
@@ -1710,7 +1572,6 @@ class MainWindow(QMainWindow):
         self.model.load(self.accounts)
         # tick mặc định: tài khoản còn phiên
         self.model.select_all_with_session()
-        self._refresh_proxy_label()
         self._refresh_pager()
         self._log("head", f"Đã nạp {len(self.accounts)} tài khoản từ {source}", "head")
         n_no = 0
@@ -1728,9 +1589,15 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ #
     def _collect_cfg(self, cid: str = "") -> RunConfig:
-        """ Gom tham số chạy. `cid` ghi đè để chạy tiếp cid kế tiếp. """
+        """ Gom tham số chạy. `cid` ghi đè để chạy tiếp cid kế tiếp.
+
+        Các ô đã bỏ khỏi UI (số luồng, trễ, số lần thử lại, xác minh like,
+        nguồn proxy, proxy dự phòng, sidecar ký, backend) lấy thẳng từ
+        settings — giá trị đó vẫn được nhớ trong settings.json.
+        """
         video = self.in_video.text().strip()
         aweme_id = extract_aweme_id(video) if video else ""
+        s = self.settings
         return RunConfig(
             mode=self.cb_mode.currentData(),
             cid=cid or (self.cids()[0] if self.cids() else ""),
@@ -1739,28 +1606,26 @@ class MainWindow(QMainWindow):
             comment="",
             search_keyword="",
             target_text="",
-            signer_url=self.in_signer.text().strip(),
+            signer_url=s.signer_url,
             proxy=self._fallback_proxy(),
-            use_proxy_pool=self.cb_pool.isChecked(),
-            rotate_on_block=self.settings.rotate_on_block,
-            region=self.settings.region,
-            timezone=self.settings.timezone,
-            language=self.settings.language,
-            concurrency=self.sp_threads.value(),
-            delay_min=self.sp_dmin.value(),
-            delay_max=self.sp_dmax.value(),
-            retries=self.sp_retry.value(),
-            verify=self.cb_verify.isChecked(),
+            use_proxy_pool=True,
+            rotate_on_block=s.rotate_on_block,
+            region=s.region,
+            timezone=s.timezone,
+            language=s.language,
+            concurrency=min(500, max(1, s.concurrency)),
+            delay_min=max(0.0, s.delay_min),
+            delay_max=max(0.0, s.delay_max),
+            retries=min(10, max(0, s.retries)),
+            verify=True,
         )
 
     def _fallback_proxy(self) -> str:
         """Proxy dùng cho account CHƯA được gán proxy riêng.
 
-        Thứ tự ưu tiên: ô nhập tay trong tab Tác vụ → proxy hệ thống (nếu bật).
+        Chỉ còn proxy hệ thống (bật ở tab Cài đặt) — ô nhập tay trong tab
+        Tác vụ đã bỏ khỏi UI.
         """
-        manual = self.in_proxy.text().strip()
-        if manual:
-            return manual
         if self.settings.use_system_proxy:
             return self.settings.system_proxy.strip()
         return ""
@@ -1768,24 +1633,10 @@ class MainWindow(QMainWindow):
     def _sync_from_settings_tab(self) -> None:
         """Đồng bộ tham số chạy về settings.
 
-        TRƯỚC đây hàm này ghi ĐÈ spinbox bằng giá trị trong settings, nên
-        người dùng sửa "Số luồng" ở tab Tác vụ rồi bấm CHẠY sẽ bị nhảy
-        về giá trị cũ — đúng cảm giác "sửa không được". Nay chiều là
-        ngược lại: spinbox là nguồn, settings nhận theo.
+        Số luồng / trễ / thử lại / xác minh like / sidecar ký đã bỏ khỏi
+        UI nên không còn ô để đồng bộ — chúng lấy thẳng từ settings.
         """
         s = self.settings
-        s.concurrency = self.sp_threads.value()
-        s.retries = self.sp_retry.value()
-        s.delay_min = self.sp_dmin.value()
-        s.delay_max = self.sp_dmax.value()
-        s.verify = self.cb_verify.isChecked()
-        s.signer_url = self.in_signer.text().strip()
-        # giữ cho ô ẩn ở tab Cài đặt đồng bộ, phòng khi sau này bật lại
-        self.tab_settings.sp_conc.setValue(s.concurrency)
-        self.tab_settings.sp_retry.setValue(s.retries)
-        self.tab_settings.sp_dmin.setValue(s.delay_min)
-        self.tab_settings.sp_dmax.setValue(s.delay_max)
-        self.tab_settings.cb_verify.setChecked(s.verify)
         self.controller._rotate = s.rotate_on_block
         self._save_settings_quiet()
 
@@ -1812,64 +1663,7 @@ class MainWindow(QMainWindow):
     def _save_param(self, name: str, value) -> None:
         """Ghi một tham số vào settings rồi lưu. Không log gì khi thành công."""
         setattr(self.settings, name, value)
-        # giữ các ô ẩn ở tab Cài đặt đồng bộ ngay, phòng khi app bị tắt
-        # đột ngột (mất điện, kill tiến trình) — lúc đó closeEvent không
-        # chạy và closeEvent chỉ là phương án dự phòng.
-        if hasattr(self, "tab_settings"):
-            mirror = {"retries": "sp_retry", "delay_min": "sp_dmin",
-                      "delay_max": "sp_dmax", "verify": "cb_verify",
-                      "signer_url": "in_signer"}.get(name)
-            if mirror:
-                w = getattr(self.tab_settings, mirror, None)
-                if w is not None:
-                    w.blockSignals(True)
-                    try:
-                        (w.setValue if name != "verify" and
-                         name != "signer_url" else
-                         (w.setChecked if name == "verify" else w.setText))(value)
-                    finally:
-                        w.blockSignals(False)
         self._save_settings_quiet()
-
-    def _on_threads_changed(self, value: int) -> None:
-        """Người dùng đổi số luồng -> lưu ngay để mở lại app còn giữ."""
-        self.settings.concurrency = value
-        # đồng bộ luôn ô ẩn của tab Cài đặt, không đợi tới lúc đóng app —
-        # nếu không thì đóng app bằng cách tắt cửa sổ đột ngột sẽ mất.
-        if hasattr(self, "tab_settings"):
-            self.tab_settings.sp_conc.setValue(value)
-        self._update_thread_hint(value)
-        self._save_settings_quiet()
-
-    def _suggest_threads(self) -> int:
-        """Gợi ý số luồng theo CPU.
-
-        Python không phải nút thắt (phân phối ~5.800 acc/s); nút thắt là
-        sidecar. Nên gợi ý theo CPU nhưng có trần, tránh gợi ý 200 luồng
-        trên máy có 4 nhân rồi người dùng tưởng app treo.
-        """
-        import os as _os
-        try:
-            cores = _os.cpu_count() or 4
-        except Exception:
-            cores = 4
-        return max(4, min(50, cores * 3))
-
-    def _update_thread_hint(self, value: int) -> None:
-        sug = self._suggest_threads()
-        if not hasattr(self, "lbl_thread_hint"):
-            return
-        if value > sug:
-            self.lbl_thread_hint.setText(
-                f"⚠ {value} luồng > gợi ý {sug} cho máy này. "
-                f"Trần thật do sidecar, tăng thêm sẽ chậm hơn chứ không "
-                f"nhanh hơn."
-            )
-        else:
-            self.lbl_thread_hint.setText(
-                f"Gợi ý cho máy này: {sug} luồng. Giá trị được nhớ, "
-                f"mở lại app vẫn giữ."
-            )
 
     def start_run(self, mode: str | None = None, dry_run: bool = False,
                   accounts: list | None = None) -> None:
@@ -1889,9 +1683,6 @@ class MainWindow(QMainWindow):
                 self.cb_mode.setCurrentIndex(i)
 
         self._sync_from_settings_tab()
-        # GUI chỉ có một backend: HTTP thật. Ép lại ngay trước khi chạy.
-        self.backend_kind.setCurrentIndex(
-            self.backend_kind.findData("http"))
         # Gom danh sách cid TRƯỚC, rồi chạy lần lượt từng cid.
         lst = self.cids()
         good, bad = self.parse_cids(self.in_cid.toPlainText())
@@ -1934,7 +1725,7 @@ class MainWindow(QMainWindow):
 
         # Chặn sớm khi sidecar chưa chạy — nếu không, MỌI tài khoản sẽ đỏ
         # và người dùng tưởng cookie hỏng.
-        if self.backend_kind.currentData() == "http" and not self._signer_ready:
+        if not self._signer_ready:
             box = QMessageBox(self)
             box.setIcon(QMessageBox.Icon.Critical)
             box.setWindowTitle("Chưa có sidecar ký")
@@ -1990,7 +1781,11 @@ class MainWindow(QMainWindow):
             box.setStandardButtons(row.Ok)
             box.button(row.Ok).setText("Hướng dẫn")
             if can_start:
-                btn_start = box.addButton("Bật sidecar ngay", row.AcceptRole)
+                # Role của QMessageBox là ButtonRole (AcceptRole của
+                # QDialogButtonBox không dùng được ở đây — trộn hai enum
+                # sẽ vỡ AttributeError ngay lúc bấm CHẠY).
+                btn_start = box.addButton(
+                    "Bật sidecar ngay", QMessageBox.ButtonRole.AcceptRole)
                 btn_start.setToolTip(
                     f"App sẽ tự chạy {SIGNER_SCRIPT} và tự hỏi khi nào xong.")
             else:
@@ -2054,7 +1849,9 @@ class MainWindow(QMainWindow):
             self._log("head", "   đường ra: tất cả qua proxy được gán", "head")
         else:
             rest = n - n_own
-            via = (f"proxy hệ thống ({cfg.proxy})" if cfg.proxy else "IP máy")
+            # KHÔNG in mật khẩu proxy ra log (log hay được gửi đi).
+            via = (f"proxy hệ thống ({proxy_display(cfg.proxy)})"
+                   if cfg.proxy else "IP máy")
             self._log(
                 "head",
                 f"   đường ra: {n_own} qua proxy gán, {rest} qua {via}",
@@ -2094,7 +1891,7 @@ class MainWindow(QMainWindow):
 
     def _set_running(self, running: bool) -> None:
         for b in (self.btn_run, self.btn_check, self.btn_load,
-                  self.btn_dry, self.btn_list):
+                  self.btn_list):
             b.setEnabled(not running)
         self.btn_stop.setEnabled(running)
 
@@ -2120,7 +1917,7 @@ class MainWindow(QMainWindow):
     def _on_started(self, count: int) -> None:
         self.lbl_stat.setText(f"0/{count}")
         self.pbar.setValue(0)
-        self.meter.start(count, self.sp_threads.value())
+        self.meter.start(count, max(1, self.settings.concurrency))
 
     @Slot(int)
     def _on_header_clicked(self, col: int) -> None:
@@ -2239,7 +2036,7 @@ class MainWindow(QMainWindow):
 
         def work() -> None:
             try:
-                info = Signer(self.in_signer.text().strip()).health(timeout=2.0)
+                info = Signer(self.settings.signer_url).health(timeout=2.0)
             except Exception:
                 call_on_gui(lambda: self.meter.set_signer(0, 0))
                 return
@@ -2462,15 +2259,18 @@ class MainWindow(QMainWindow):
             self.controller.wait(4000)
 
         # lưu cấu hình (kể cả mật khẩu proxy — file này tương đương bí mật)
-        # Dong bo o an cua tab Cai dat ve gia tri dang hien o tab Tac vu
-        # TRUOC khi luu. Neu khong, _sync_to_settings() lay sp_conc cu
-        # (mac dinh 10) roi ghi de moi thieu nguoi dung vua chinh — day
-        # chinh la ly do "sua so luong khong duoc, mo lai ve 10".
+        # Đồng bộ tab Cài đặt về settings TRƯỚC khi lưu. Số luồng / trễ /
+        # thử lại / xác minh like đã bỏ khỏi UI nên lấy thẳng từ settings,
+        # không còn ô ẩn nào ghi đè giá trị người dùng đã chỉnh.
         self._sync_from_settings_tab()
         self.tab_settings._sync_to_settings()
-        self.settings.last_cookie_file = str(
-            self.settings.last_cookie_file or Path.cwd() / "cokie.tik.txt"
-        )
+        # Đường dẫn file cookie: giữ nguyên cái đã nạp lần trước. Chỉ dùng
+        # file mặc định khi nó thực sự tồn tại — trỏ vào file không có chỉ
+        # là rác, và cwd của app có thể khác mỗi lần mở.
+        if not self.settings.last_cookie_file:
+            default_cookie = Path.cwd() / "cokie.tik.txt"
+            if default_cookie.exists():
+                self.settings.last_cookie_file = str(default_cookie)
         self.settings.cid_list = self.in_cid.toPlainText()
         self.settings.per_page = 0          # 0 = không phân trang
         try:

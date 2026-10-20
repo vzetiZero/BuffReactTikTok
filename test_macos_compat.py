@@ -15,9 +15,14 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# Test KHÔNG được đụng vào settings.json thật của người dùng.
+os.environ["APPDATA"] = os.path.join(
+    tempfile.mkdtemp(prefix="tiktok_test_"), "TikTokManager")
+os.environ["XDG_CONFIG_HOME"] = os.environ["APPDATA"]
 
 ROOT = pathlib.Path(__file__).parent
 

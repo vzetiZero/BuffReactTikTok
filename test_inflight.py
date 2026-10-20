@@ -13,10 +13,16 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# Test KHÔNG được đụng vào settings.json thật của người dùng: MainWindow
+# tự lưu cấu hình khi đóng. Dùng thư mục tạm cho APPDATA.
+os.environ["APPDATA"] = os.path.join(
+    tempfile.mkdtemp(prefix="tiktok_test_"), "TikTokManager")
+os.environ["XDG_CONFIG_HOME"] = os.environ["APPDATA"]
 # console Windows mac dinh cp1252 -> in dau tieng Viet la loi; dua ve utf-8
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -112,9 +118,9 @@ def test_gauges_on_gui() -> None:
     from core.backends.mock_backend import MockBackend
     w._signer_ready = True
     w.controller._factory = lambda: MockBackend(fail_rate=0.0, scale=1.0)
-    w.sp_threads.setValue(12)
-    w.sp_dmin.setValue(0.0)
-    w.sp_dmax.setValue(0.0)
+    w.settings.concurrency = 12
+    w.settings.delay_min = 0.0
+    w.settings.delay_max = 0.0
     # GUI nap tham so tu bo nho phien truoc; lan chay that co the da luu
     # pick_limit (vd 50). Test nay muon chay HET 60 tai khoan nen phai ep
     # ve "tat ca" (0), khong thi ket qua phu thuoc setting cua nguoi dung.

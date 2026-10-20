@@ -110,6 +110,15 @@ popd
 :open
 cd /d "%DIR%"
 
+REM ---- Sidecar da chay san tren cong %PORT%? -> KHONG bat them ----
+REM Neu bat them, node se chet ngay vi khong bind duoc cong %PORT% (da ban),
+REM va app bao "sidecar da dung" -> nguoi dung tu dong lai rat nhieu.
+REM Thay vao do: giu cua so nay mo va bao "da chay san".
+for /f "tokens=2" %%v in ('curl -s http://127.0.0.1:%PORT%/health 2^>nul') do set "H2=%%v"
+if not "%H2%"=="" goto :already_running
+
+:start_sidecar
+
 REM ---- tro Puppeteer ve dung ban Chrome da tai ----
 REM KHONG ghi truc tiep node -e "...(ngoac)..." vao for /f: danh nhay
 REM long cung dau nhay voi dau backtick se lam cmd bao loi
@@ -134,3 +143,16 @@ echo ==========================================================
 echo.
 "%NPM%" start
 endlocal
+goto :eof
+
+:already_running
+echo.
+echo ==========================================================
+echo   SIDECAR DA CHAY SAN tren cong %PORT%.
+echo   Khong bat them (chi mot sidecar duoc bind cong nay).
+echo   Cua so nay chi de giu sidecar lai. Bam Ctrl+C de dong.
+echo ==========================================================
+echo.
+:wait_sidecar
+timeout /t 5 /nobreak >nul
+goto :wait_sidecar

@@ -1,4 +1,4 @@
-"""Test LUỒI CHẠY THẬT của hàng đợi cid — dùng backend mock, không gọi mạng.
+﻿"""Test LUỒI CHẠY THẬT của hàng đợi cid — dùng backend mock, không gọi mạng.
 
 Kiểm tra điều quan trọng nhất: chạy xong cid này thì hệ thống TỰ chạy cid
 kế tiếp, đúng thứ tự, và mỗi tài khoản được thả tim đúng 1 lần cho mỗi cid.
@@ -8,9 +8,14 @@ Chạy:  python test_cid_queue.py
 
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# Test KHÔNG được đụng vào settings.json thật của người dùng.
+os.environ["APPDATA"] = os.path.join(
+    tempfile.mkdtemp(prefix="tiktok_test_"), "TikTokManager")
+os.environ["XDG_CONFIG_HOME"] = os.environ["APPDATA"]
 
 # Bộ canh: nếu test treo quá 60 giây thì in stack rồi tắt cứng, để không
 # phải ngồi chờ vô hạn mỗi lần debug.
@@ -110,13 +115,22 @@ def main():
         dialogs.append((title, text))
         return QMessageBox.StandardButton.Ok
 
+    # Hộp thoại tự tạo (dùng .exec()) cũng treo test — chặn luôn.
+    _exec = QMessageBox.exec
+
+    def fake_exec(self):
+        dialogs.append((self.windowTitle(), self.text()))
+        return QMessageBox.StandardButton.Ok
+
     QMessageBox.warning = staticmethod(fake_warn)
     QMessageBox.information = staticmethod(fake_info)
+    QMessageBox.exec = fake_exec
     try:
         return _run(win, dialogs)
     finally:
         QMessageBox.warning = staticmethod(_warn)
         QMessageBox.information = staticmethod(_info)
+        QMessageBox.exec = _exec
 
 
 def _run(win, dialogs):
@@ -133,9 +147,9 @@ def _run(win, dialogs):
     print(f"\n=== Chạy {len(CIDS)} cid x {N_ACC} tai khoan (mock) ===")
     win.in_cid.setPlainText("\n".join(CIDS))
     win.cb_mode.setCurrentIndex(win.cb_mode.findData(MODE_LIKE_CID))
-    win.sp_threads.setValue(N_ACC)
-    win.sp_dmin.setValue(0.0)
-    win.sp_dmax.setValue(0.0)
+    win.settings.concurrency = N_ACC
+    win.settings.delay_min = 0.0
+    win.settings.delay_max = 0.0
 
     # theo dõi thứ tự các cid thực sự được chạy
     seen_order = []
@@ -146,6 +160,8 @@ def _run(win, dialogs):
         real_start(accs, cfg)
 
     win.controller.start = spy_start
+
+    win._signer_ready = True
 
     win.start_run()
     done = wait_for(win, lambda: not win._cid_queue and not win.controller.busy,
@@ -227,6 +243,7 @@ def _run(win, dialogs):
     seen_order.clear()
     win.controller._factory = lambda: MockBackend(fail_rate=1.0, scale=0.0)
     win.in_cid.setPlainText(f"{CIDS[0]}\n{CIDS[1]}")
+    win._signer_ready = True
     win.start_run()
     wait_for(win, lambda: not win._cid_queue and not win.controller.busy,
              timeout_ms=40000)
@@ -242,6 +259,7 @@ def _run(win, dialogs):
     seen_order.clear()
     dialogs.clear()
     win.in_cid.setPlainText("")
+    win._signer_ready = True
     win.start_run()
     check("khong chay gi khi danh sach rong", seen_order, [])
     check("co bao loi 'Thieu cid'", any(t == "Thiếu cid" for t, _ in dialogs),
@@ -251,6 +269,7 @@ def _run(win, dialogs):
     print("\n=== Danh sach co dong rac ===")
     seen_order.clear()
     win.in_cid.setPlainText(f"{CIDS[0]}\nabc\n\n{CIDS[1]}")
+    win._signer_ready = True
     win.start_run()
     wait_for(win, lambda: not win._cid_queue and not win.controller.busy, 40000)
     check("bo qua dong chu cai, van chay 2 cid", seen_order, CIDS[:2])
@@ -261,6 +280,7 @@ def _run(win, dialogs):
     win.in_cid.setPlainText("\n".join(CIDS))
     # 3 cid x 4 acc, moi acc chay ~0.5s -> can chay lau de co canh giua
     win.controller._factory = lambda: MockBackend(fail_rate=0.0, scale=3.0)
+    win._signer_ready = True
     win.start_run()
     wait_for(win, lambda: win.controller.busy, 4000)
     n_when_stop = len(seen_order)

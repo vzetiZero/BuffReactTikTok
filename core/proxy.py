@@ -184,6 +184,41 @@ def parse_block(text: str) -> tuple[list[ProxyProfile], list[str]]:
     return good, bad
 
 
+def proxy_url(raw: str) -> str:
+    """Chuẩn hoá 1 chuỗi proxy thành URL mà curl_cffi chấp nhận.
+
+    ⚠ Bắt buộc phải qua đây trước khi đưa vào `proxies={...}`. Định dạng
+    "IP:port:user:pass" (kiểu VPN Express, kiểu phổ biến ở tab Cài đặt)
+    là CÔNG DỒN 4 phần — đưa thẳng vào curl sẽ báo:
+
+        curl: (5) Unsupported proxy syntax in 'http://1.2.3.4:8080:user:pass':
+        Port number was not a decimal number between 0 and 65535
+
+    Nhận mọi định dạng: "1.2.3.4:8080", "1.2.3.4:8080:user:pass",
+    "user:pass@1.2.3.4:8080", "http://user:pass@1.2.3.4:8080",
+    "socks5://1.2.3.4:1080". Trả "" nếu rác.
+    """
+    s = (raw or "").strip().strip("`").strip()
+    if not s:
+        return ""
+    prof = parse_proxy(s)
+    if prof is not None and prof.host:
+        return prof.to_url()
+    # Không parse được: giữ nguyên nếu có scheme, thêm http:// nếu chưa có.
+    return s if "://" in s else f"http://{s}"
+
+
+def proxy_display(raw: str) -> str:
+    """Dạng để HIỂN THỊ — mật khẩu bị che (đừng ghi mật khẩu vào log)."""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    prof = parse_proxy(s)
+    if prof is not None and prof.host:
+        return prof.safe_url()
+    return s
+
+
 # --------------------------------------------------------------------------- #
 # Cổng VPN Express
 # --------------------------------------------------------------------------- #

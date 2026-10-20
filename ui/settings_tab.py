@@ -10,7 +10,6 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -287,17 +286,9 @@ class SettingsTab(QWidget):
         f.setVerticalSpacing(5)
         f.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        # KHÔNG đặt "Số luồng" / "Thử lại" ở đây nữa: tab Tác vụ đã có,
-        # và có 2 ô cùng tên là người dùng sửa xong bị ô kia ghi đè mà
-        # không biết. Giá trị lấy từ tab Tác vụ khi lưu.
-        # Ô cũ vẫn tồn tại (setValue/setValue trong _sync) để không phá
-        # code đang đọc nó, nhưng không hiện ra giao diện.
-        self.sp_conc = QSpinBox()
-        self.sp_conc.setRange(1, 500)
-        self.sp_conc.setVisible(False)
-        self.sp_retry = QSpinBox()
-        self.sp_retry.setRange(0, 10)
-        self.sp_retry.setVisible(False)
+        # KHÔNG đặt "Số luồng" / "Thử lại" / "Trễ ngẫu nhiên" / "Xác minh
+        # like" / "Sidecar ký" ở đây: những ô đó đã bỏ khỏi UI hẳn, app
+        # lấy thẳng từ settings (xem MainWindow._collect_cfg).
         self.in_region = QLineEdit()
         f.addRow("Region:", self.in_region)
         self.in_tz = QLineEdit()
@@ -310,36 +301,7 @@ class SettingsTab(QWidget):
             "thì app tự dùng vi-VN. Điền tay chỉ khi biết chắc."
         )
         f.addRow("Ngôn ngữ:", self.in_lang)
-        self.in_signer = QLineEdit()
-        self.in_signer.setVisible(False)   # tab Tác vụ đã có
-        f.addRow("Sidecar ký:", self.in_signer)
 
-        # Trễ ngẫu nhiên + xác minh like: chỉ ở tab Tác vụ (tránh trùng).
-        d = QWidget()
-        dh = QHBoxLayout(d)
-        dh.setContentsMargins(0, 0, 0, 0)
-        dh.setSpacing(4)
-        d.setVisible(False)
-        self.sp_dmin = QDoubleSpinBox()
-        self.sp_dmax = QDoubleSpinBox()
-        for sp in (self.sp_dmin, self.sp_dmax):
-            sp.setRange(0, 600)
-            sp.setSingleStep(0.5)
-            sp.setSuffix(" s")
-            sp.setFixedWidth(82)
-        arr = QLabel("→")
-        arr.setFixedWidth(14)
-        arr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        arr.setProperty("role", "hint")
-        dh.addWidget(self.sp_dmin)
-        dh.addWidget(arr)
-        dh.addWidget(self.sp_dmax)
-        dh.addStretch(1)
-        f.addRow("Trễ ngẫu nhiên:", d)
-
-        self.cb_verify = QCheckBox("Xác minh số like sau khi thả tim")
-        self.cb_verify.setVisible(False)   # tab Tác vụ đã có
-        f.addRow("", self.cb_verify)
         self.cb_rotate = QCheckBox("Tự đổi proxy khi bị chặn IP")
         self.cb_rotate.setToolTip(
             "Khi TikTok trả mã lỗi liên quan IP (8, 10202, 10221…) thì\n"
@@ -483,15 +445,9 @@ class SettingsTab(QWidget):
         self.in_gw_cc.setText(s.gw_country)
         self.in_gw_tpl.setText(s.gw_template)
         self.cb_gw.setChecked(s.gw_enabled)
-        self.sp_conc.setValue(s.concurrency)
-        self.sp_retry.setValue(s.retries)
         self.in_region.setText(s.region)
         self.in_tz.setText(s.timezone)
         self.in_lang.setText(s.language)
-        self.in_signer.setText(s.signer_url)
-        self.sp_dmin.setValue(s.delay_min)
-        self.sp_dmax.setValue(s.delay_max)
-        self.cb_verify.setChecked(s.verify)
         self.cb_rotate.setChecked(s.rotate_on_block)
         self.cb_autochk.setChecked(s.proxy_auto_check)
         self.cb_sys.setChecked(s.use_system_proxy)
@@ -513,15 +469,9 @@ class SettingsTab(QWidget):
         s.gw_country = self.in_gw_cc.text().strip() or "vn"
         s.gw_template = self.in_gw_tpl.text().strip()
         s.gw_enabled = self.cb_gw.isChecked()
-        s.concurrency = self.sp_conc.value()
-        s.retries = self.sp_retry.value()
         s.region = self.in_region.text().strip() or "VN"
         s.timezone = self.in_tz.text().strip() or "Asia/Bangkok"
         s.language = self.in_lang.text().strip()
-        s.signer_url = self.in_signer.text().strip()
-        s.delay_min = self.sp_dmin.value()
-        s.delay_max = self.sp_dmax.value()
-        s.verify = self.cb_verify.isChecked()
         s.rotate_on_block = self.cb_rotate.isChecked()
         s.proxy_auto_check = self.cb_autochk.isChecked()
         s.use_system_proxy = self.cb_sys.isChecked()

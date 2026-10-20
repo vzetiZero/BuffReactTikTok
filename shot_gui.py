@@ -76,7 +76,6 @@ def main():
     win = MainWindow()
     # Chặn tự nạp lại tài khoản đã lưu, nếu không nó ghi đè dữ liệu demo.
     win._restore_accounts = lambda: None
-    win.backend_kind.setCurrentIndex(win.backend_kind.findData("http"))
     win._signer_ready = True
 
     win._apply_accounts(build_accounts(), "demo")
@@ -87,7 +86,6 @@ def main():
         "7700000000000000002"
     )
     win.cb_mode.setCurrentIndex(win.cb_mode.findData(MODE_LIKE_CID))
-    win.in_search.setText("")
     win.tabs.setCurrentWidget(win.tab_main)
     # KHÔNG showMaximized: máy này scale 150% nên cửa sổ tối đa chỉ 720px
     # logic. Ép kích thước 1080p @100% để đo đúng 50 dòng.
@@ -102,15 +100,11 @@ def main():
               if ok else "LUU THAT BAI")
         print(f"cua so      : {win.width()} x {win.height()}")
         print(f"per page    : {win.model.per_page}  |  trang: {win.model.page_count}")
-        print(f"row_h       : {win.delegate.row_h()}px x {win.model.per_page} "
-              f"= {win.delegate.row_h() * win.model.per_page}px")
-        print(f"viewport    : {win.table.viewport().height()}px")
-        # chụp thêm tab Tác vụ để xem ô cid đã tối giản
-        win.tabs.setCurrentWidget(win.tab_task)
-        for _ in range(3):
-            app.processEvents()
-        ok2 = win.grab().save(OUT.replace(".png", "_task.png"))
-        print(f"task tab    : {'OK' if ok2 else 'FAIL'}")
+        deleg = win.tbl_run.itemDelegate()
+        row_h = deleg.row_h() if hasattr(deleg, "row_h") else 0
+        print(f"row_h       : {row_h}px x {win.model.per_page} "
+              f"= {row_h * win.model.per_page}px")
+        print(f"viewport    : {win.tbl_run.viewport().height()}px")
         print(f"cid label   : {win.lbl_cid_stat.text()}")
         win.close()
         app.quit()

@@ -18,11 +18,18 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# Test dùng settings.json RIÊNG (thư mục tạm) — không đụng vào file thật
+# của người dùng. Tiến trình con kế thừa biến môi trường này nên vẫn
+# kiểm tra đúng "sống qua nhiều tiến trình" như trước.
+os.environ["APPDATA"] = os.path.join(
+    tempfile.mkdtemp(prefix="tiktok_test_"), "TikTokManager")
+os.environ["XDG_CONFIG_HOME"] = os.environ["APPDATA"]
 
 ROOT = Path(__file__).parent
 PASS, FAIL = 0, 0
@@ -48,7 +55,7 @@ from PySide6.QtWidgets import QApplication
 from ui.main_window import MainWindow
 
 NEW = dict(threads=27, retry=4, dmin=0.5, dmax=2.5,
-           pick=120, how="random", verify=False)
+           pick=120, how="random")
 KILL = {kill}
 
 app = QApplication([])
@@ -57,19 +64,21 @@ w = MainWindow()
 def work():
     for _ in range(20):
         app.processEvents()
-    w.sp_threads.setValue(NEW["threads"])
-    w.sp_retry.setValue(NEW["retry"])
-    w.sp_dmin.setValue(NEW["dmin"])
-    w.sp_dmax.setValue(NEW["dmax"])
+    # Các ô số luồng / trễ / số lần thử lại đã bỏ khỏi UI: app lấy thẳng
+    # từ settings, nên test đổi settings rồi lưu (giống hành vi thật).
+    w.settings.concurrency = NEW["threads"]
+    w.settings.retries = NEW["retry"]
+    w.settings.delay_min = NEW["dmin"]
+    w.settings.delay_max = NEW["dmax"]
+    w._save_settings_quiet()
     w.sp_pick.setValue(NEW["pick"])
     w.rb_pick_random.setChecked(NEW["how"] == "random")
-    w.cb_verify.setChecked(NEW["verify"])
     for _ in range(20):
         app.processEvents()
     # In ra de parent doi chieu
-    print("CHILD_WIDGET", w.sp_threads.value(), w.sp_retry.value(),
-          w.sp_dmin.value(), w.sp_dmax.value(), w.sp_pick.value(),
-          w._pick_how(), int(w.cb_verify.isChecked()))
+    print("CHILD_WIDGET", w.settings.concurrency, w.settings.retries,
+          w.settings.delay_min, w.settings.delay_max, w.sp_pick.value(),
+          w._pick_how())
     # cfg that su dung khi chay
     print("CHILD_CFG", w._collect_cfg("7602703562657022728").concurrency)
     if KILL:
@@ -101,8 +110,7 @@ def run_child(kill: bool) -> dict:
         if line.startswith("CHILD_WIDGET"):
             v = line.split()[1:]
             out.update(threads=int(v[0]), retry=int(v[1]), dmin=float(v[2]),
-                       dmax=float(v[3]), pick=int(v[4]), how=v[5],
-                       verify=v[6] == "1")
+                       dmax=float(v[3]), pick=int(v[4]), how=v[5])
         elif line.startswith("CHILD_CFG"):
             out["cfg"] = int(line.split()[1])
     if r.returncode != 0 and not out:
@@ -121,8 +129,7 @@ def main():
     def write_base():
         d = json.loads(backup) if backup else {}
         d.update({"concurrency": 10, "retries": 1, "delay_min": 0.0,
-                  "delay_max": 1.0, "pick_limit": 0, "pick_how": "order",
-                  "verify": True})
+                  "delay_max": 1.0, "pick_limit": 0, "pick_how": "order"})
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(d, ensure_ascii=False, indent=2),
                         encoding="utf-8")
@@ -131,8 +138,7 @@ def main():
         d = json.loads(path.read_text(encoding="utf-8"))
         return dict(threads=d["concurrency"], retry=d["retries"],
                     dmin=d["delay_min"], dmax=d["delay_max"],
-                    pick=d["pick_limit"], how=d["pick_how"],
-                    verify=d["verify"])
+                    pick=d["pick_limit"], how=d["pick_how"])
 
     try:
         # ============================================================== #
@@ -145,16 +151,14 @@ def main():
 
         on_disk = read_file()
         for k, want in (("threads", 27), ("retry", 4), ("dmin", 0.5),
-                        ("dmax", 2.5), ("pick", 120), ("how", "random"),
-                        ("verify", False)):
+                        ("dmax", 2.5), ("pick", 120), ("how", "random")):
             check(f"file trên đĩa giữ {k}", on_disk[k], want)
 
         # Mở app MỚI, đọc lại — KHÔNG đụng vào file, đọc đúng thứ
         # tiến trình con vừa ghi lại (đây mới là lần mở thật tiếp theo).
         r2 = run_child_read(path)
         for k, want in (("threads", 27), ("retry", 4), ("dmin", 0.5),
-                        ("dmax", 2.5), ("pick", 120), ("how", "random"),
-                        ("verify", False)):
+                        ("dmax", 2.5), ("pick", 120), ("how", "random")):
             check(f"mở lại app, ô {k} đúng", r2.get(k), want)
 
         # ============================================================== #
@@ -178,7 +182,7 @@ def main():
                         encoding="utf-8")
         r3 = run_child_read(path)
         check("số luồng vượt trần bị kẹp về giá trị hợp lệ",
-              1 <= r3.get("threads", 0) <= 500, True)
+              1 <= r3.get("cfg_conc", 0) <= 500, True)
         check("pick_how lạ -> rơi về 'order'",
               r3.get("how") in ("order", "random"), True)
         check("thiếu khoá pick_limit -> dùng mặc định, không crash",
@@ -212,9 +216,9 @@ w = MainWindow()
 def work():
     for _ in range(20):
         app.processEvents()
-    print("READ", w.sp_threads.value(), w.sp_retry.value(),
-          w.sp_dmin.value(), w.sp_dmax.value(), w.sp_pick.value(),
-          w._pick_how(), int(w.cb_verify.isChecked()))
+    print("READ", w.settings.concurrency, w.settings.retries,
+          w.settings.delay_min, w.settings.delay_max, w.sp_pick.value(),
+          w._pick_how(), w._collect_cfg().concurrency)
     w.close()
     for _ in range(6):
         app.processEvents()
@@ -242,7 +246,7 @@ def run_child_read(_path) -> dict:
             v = line.split()[1:]
             out = dict(threads=int(v[0]), retry=int(v[1]), dmin=float(v[2]),
                        dmax=float(v[3]), pick=int(v[4]), how=v[5],
-                       verify=v[6] == "1", ok=True)
+                       cfg_conc=int(v[6]), ok=True)
             return out
     return {"ok": False}
 

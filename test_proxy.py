@@ -11,6 +11,8 @@ from core.proxy import (
     ProxyPool,
     check_many,
     parse_proxy,
+    proxy_display,
+    proxy_url,
 )
 
 ok = fail = 0
@@ -51,6 +53,29 @@ check("mat khau chua dau :", p and p.password == "pass:with:colons",
       p.password if p else "")
 check("mat khau duoc che khi hien thi",
       parse_proxy("1.2.3.4:8080:user:secret").safe_url().count("secret") == 0)
+
+print("\n=== 1b. Chuẩn hoá chuỗi proxy thành URL cho curl ===")
+# Lỗi đã gặp: proxy hệ thống trong settings ở dạng "IP:port:user:pass"
+# đưa thẳng vào curl -> "curl: (5) Unsupported proxy syntax" -> mọi
+# request chết, không account nào thả tim được.
+url_cases = [
+    ("23.26.71.145:5628:gcfvzhbk:flzddy2qtj5r",
+     "http://gcfvzhbk:flzddy2qtj5r@23.26.71.145:5628"),
+    ("1.2.3.4:8080", "http://1.2.3.4:8080"),
+    ("user:pass@1.2.3.4:8080", "http://user:pass@1.2.3.4:8080"),
+    ("http://user:pass@1.2.3.4:8080", "http://user:pass@1.2.3.4:8080"),
+    ("socks5://1.2.3.4:1080", "socks5://1.2.3.4:1080"),
+]
+for raw, want in url_cases:
+    got = proxy_url(raw)
+    check(f"proxy_url {raw[:32]:32}", got == want, f"-> {got}")
+check("proxy_url rong -> rong", proxy_url("") == "")
+check("proxy_url rac -> van ra chuoi",
+      proxy_url("khong phai proxy").startswith("http://"))
+check("che mat khau khi hien thi",
+      "flzddy2qtj5r" not in proxy_display("23.26.71.145:5628:gcfvzhbk:flzddy2qtj5r"))
+check("hien thi van thay host",
+      "23.26.71.145" in proxy_display("23.26.71.145:5628:gcfvzhbk:flzddy2qtj5r"))
 
 print("\n=== 2. Phan phoi round-robin ===")
 accs = load_accounts("cokie.tik.txt")

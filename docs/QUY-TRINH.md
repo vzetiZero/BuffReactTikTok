@@ -108,27 +108,109 @@ HttpBackend.run()
  │
  ├─ 3. Theo chế độ đã chọn:
  │
- │   [like_cid]  ← MẶC ĐỊNH
- │      ├─ POST /api/comment/digg/?aweme_id=..&cid=..&digg_type=1
- │      ├─ status_code == 0  → đọc lại comment, so sánh digg_count trước/sau
- │      └─ ghi kết quả: "♥ cid=… · like 244 → 245"
- │
- │   [find_like]
- │      ├─ GET /api/comment/list/?aweme_id=..&count=50   (phân trang)
- │      ├─ với mỗi comment có reply: GET /api/comment/list/reply/
- │      ├─ lọc theo target_text (không phân biệt hoa thường)
- │      └─ rồi gọi digg như trên
- │
- │   [reply_cid]
- │      └─ POST /api/comment/item/comment/publish/  (fallback: /publish/async/)
- │           body kèm comment_id = cid  → trả lời đúng bình luận đó
- │
- │   [check]
- │      └─ dừng ở bước 2
- │
- └─ 4. Trả TaskResult(status, note, comment_id, found, ok, code)
+  │   [like_cid]  ← MẶC ĐỊNH
+  │      ├─ POST /api/comment/digg/?aweme_id=..&cid=..&digg_type=1
+  │      ├─ status_code == 0  → đọc lại comment, so sánh digg_count trước/sau
+  │      └─ ghi kết quả: "♥ cid=… · like 244 → 245"
+  │
+  │   [find_like]
+  │      ├─ GET /api/comment/list/?aweme_id=..&count=50   (phân trang)
+  │      ├─ với mỗi comment có reply: GET /api/comment/list/reply/
+  │      ├─ lọc theo target_text (không phân biệt hoa thường)
+  │      └─ rồi gọi digg như trên
+  │
+  │   [reply_cid]
+  │      └─ POST /api/comment/item/comment/publish/  (fallback: /publish/async/)
+  │           body kèm comment_id = cid  → trả lời đúng bình luận đó
+  │
+  │   [check]
+  │      └─ dừng ở bước 2
+  │
+  └─ 4. Trả TaskResult(status, note, comment_id, found, ok, code)
         └─ emit signal về GUI — worker KHÔNG tự update gì
 ```
+
+### 3.0. Thả tim cho REPLY — vì sao trước đây không dính
+
+**Triệu chứng:** thả tim cho bình luận GỐC thì số like tăng, thả tim cho
+REPLY thì API trả `status_code: 0` nhưng số like KHÔNG đổi.
+
+**Đo thật (video `7690908625404955910`, proxy VN):**
+
+| Cách gửi | comment gốc | REPLY |
+|---|---|---|
+| `cid` + `aweme_id` + `digg_type=1` (format của app) | ✅ dính | ✅ **dính** |
+| Không có `aweme_id` | ✅ dính | ✅ dính |
+| `+reply_id`, `+channel_id`, `history_len=3`, bỏ `msToken`, `referer=` rỗng, gửi tham số trong body | — | không cần thiết |
+
+Kết luận: **request thả tim ĐÚNG RỒI, kể cả cho reply.** Công cụ `timT`
+(`tim_cmt`) gửi y hệt (`/api/comment/digg/?...&cid=..&digg_type=1`), không
+có tham số nào riêng cho reply. Vậy lỗi KHÔNG nằm ở request.
+
+**Lỗi thật nằm ở bước XÁC MINH — và nó làm hỏng luôn việc thả tim:**
+
+Xác minh phải biết cid nằm ở đâu trong cây bình luận.
+
+- Bình luận GỐC: đọc `/api/comment/list/` là xong → **1 request**.
+- REPLY: phải biết cid CHA của nó → phải quét từng bình luận cha, mỗi cha
+  1 request `/api/comment/list/reply/`. Video có 20 bình luận có reply là
+  **21 request cho MỘT lần xác minh**.
+
+Trước đây **mỗi account tự quét lại từ đầu**. Chạy 764 account cùng 1 cid:
+
+```
+764 account × (1 quét + 1 thả tim + 2 lần xác minh)
+  với reply: 764 × ~22 request ≈ 16.000 request ra cùng 1 IP
+```
+
+TikTok chặn IP sau vài nghìn request → account nào cũng không thả tim được.
+Comment GỐC "vẫn chạy" vì chỉ tốn 4 request/account.
+
+**Cách sửa (`core/tiktok.py` — `CommentLocator`):**
+
+1. Vị trí của 1 cid được **nhớ dùng chung cho MỌI account** (`LOCATOR`).
+2. **Chỉ 1 luồng quét thật**; các luồng khác chờ rồi dùng kết quả
+   (khoá theo từng cid) → không còn N account quét song song.
+3. Sau lần quét đầu, mỗi account chỉ tốn **1 request** để xác minh.
+4. Không tìm thấy thì cũng được nhớ (5 phút) để 764 account không quét
+   lại 1 cid vô ích.
+5. Kết quả tìm theo từ khoá (chế độ `find_like`) cũng được nhớ, y hệt.
+6. Quét reply có **phân trang** (`/api/comment/list/reply/` có nhiều trang;
+   reply nằm ở trang 2 trở đi thì đọc trang đầu sẽ không thấy).
+
+Kết quả: reply tốn **3 request/account** (thả tim + xác minh + kiểm tra
+đăng nhập) — y như comment gốc.
+
+**Thêm nữa (`core/backends/http_backend.py`):**
+
+- **Thả tim TRƯỚC, xác minh SAU.** Trước đây app đọc trạng thái comment
+  *trước* khi thả tim (1 request/account) chỉ để biết account nào đã thả
+  rồi. Nhưng API đã trả `200034` khi account đã thả tim rồi, nên đọc
+  trước là thừa. Bỏ đi:
+  - mỗi account bớt 1 request (ít tải IP hơn),
+  - và quan trọng hơn: **tim luôn được thả trước**, nên khi xác minh lỗi
+    (IP bị chặn, không tìm ra comment) thì tim vẫn đã lên — trước đây
+    đọc trước bị chặn thì cả lô không thả được tim nào.
+- Xác minh thất bại thì **đọc lại lần 2 sau 1,5 giây**: danh sách bình
+  luận của TikTok cache vài giây, đọc ngay dễ thấy `user_digged=0` dù
+  tim đã lên.
+
+Bài học: khi chạy nhiều account trên 1 IP, **mọi việc đọc dữ liệu dùng
+chung phải được cache ở tầng app**, không được để mỗi account tự quét.
+
+### 3.0.1. Đo thật (video `7622886079963630866`, proxy VN)
+
+| Bước | Kết quả |
+|---|---|
+| Thả tim reply bằng format của app | `user_digged` 0→1, `digg_count` 0→1 ✅ |
+| Thả tim reply KHÔNG kèm `aweme_id` | ✅ dính |
+| Chạy đúng luồng app (`HttpBackend._like_cid`) | like lên (`digged=1`) ✅ |
+| 8 account chạy song song | TikTok trả **body rỗng** (chặn IP) ❌ |
+
+Dòng cuối chính là triệu chứng của người dùng: lô nhỏ thì được, lô lớn thì
+TikTok chặn IP giữa chừng và **không account nào thả tim được**. Càng lên
+nhiều account thì càng dễ, vì mỗi account lại tự quét cây bình luận.
+
 
 ### 3.1. Quy tắc bất di bất dịch về luồng (threading)
 

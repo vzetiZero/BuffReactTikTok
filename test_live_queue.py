@@ -8,9 +8,15 @@ Chạy:  python test_live_queue.py <cid> [so_acc]
 
 import os
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Test KHÔNG được đụng vào settings.json thật của người dùng (MainWindow tự
+# lưu cấu hình khi đóng) — dùng thư mục tạm.
+os.environ["APPDATA"] = os.path.join(
+    tempfile.mkdtemp(prefix="tiktok_test_"), "TikTokManager")
+os.environ["XDG_CONFIG_HOME"] = os.environ["APPDATA"]
 
 from PySide6.QtCore import QEventLoop, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
@@ -44,7 +50,6 @@ def main():
     app = QApplication(sys.argv)
     win = MainWindow()
     win._restore_accounts = lambda: None
-    win.backend_kind.setCurrentIndex(win.backend_kind.findData("http"))
     win._signer_ready = True
     # không hiện hộp thoại modal (offscreen không ai bấm được)
     QMessageBox.warning = staticmethod(
@@ -56,10 +61,10 @@ def main():
     win._apply_accounts(accounts, "test that")
     win.in_cid.setPlainText(CIDS)
     win.cb_mode.setCurrentIndex(win.cb_mode.findData(MODE_LIKE_CID))
-    win.sp_threads.setValue(max(1, len(accounts)))
-    win.sp_dmin.setValue(0.0)
-    win.sp_dmax.setValue(0.0)
-    win.sp_retry.setValue(1)
+    win.settings.concurrency = max(1, len(accounts))
+    win.settings.delay_min = 0.0
+    win.settings.delay_max = 0.0
+    win.settings.retries = 1
 
     lst = win.cids()
     print(f"sidecar : {'OK' if win._signer_ready else 'KHONG'}")

@@ -1,9 +1,13 @@
-"""Kiểm tra tham số chạy được LƯU lại — sửa rồi mở app phải còn nguyên.
+"""Kiểm tra tham số chạy được LƯU lại — mở lại app phải còn nguyên.
 
 Lỗi đã gặp: ô "Số luồng" sửa xong không ăn, mở lại app về 10.
 Nguyên nhân thật: tab Cài đặt có MỘT ô số luồng nữa (ẩn đi sau này) và
 `closeEvent` gọi `_sync_to_settings()` của tab đó — lấy giá trị cũ rồi
 ghi đè lên thứ người dùng vừa chỉnh ở tab Tác vụ.
+
+Từ nay các ô số luồng / trễ / số lần thử lại đã BỎ khỏi UI: app đọc
+thẳng từ settings.json, nên test kiểm tra luồng đó — sửa settings thì
+lần chạy kế phải dùng đúng giá trị đó, và đóng/mở lại app không mất.
 
 Test này dùng settings.json thật (đường dẫn config thật của user) và
 tự khôi phục lại sau khi chạy, không phá cấu hình của bạn.
@@ -16,11 +20,17 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# Test dùng settings.json RIÊNG (thư mục tạm) — không đụng vào file thật
+# của người dùng.
+os.environ["APPDATA"] = os.path.join(
+    tempfile.mkdtemp(prefix="tiktok_test_"), "TikTokManager")
+os.environ["XDG_CONFIG_HOME"] = os.environ["APPDATA"]
 
 PASS, FAIL = 0, 0
 
@@ -50,7 +60,7 @@ def main():
         d = json.loads(backup) if backup else {}
         d.update({"concurrency": 10, "retries": 1, "delay_min": 0.0,
                   "delay_max": 1.0, "pick_limit": 0, "pick_how": "order",
-                  "mode": "like_cid", "verify": True})
+                  "mode": "like_cid"})
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(d, ensure_ascii=False, indent=2),
                         encoding="utf-8")
@@ -73,19 +83,23 @@ def main():
         reset()
         w1 = MainWindow()
         spin()
-        check("so luong mac dinh la 10", w1.sp_threads.value(), 10)
-        check("retry mac dinh la 1", w1.sp_retry.value(), 1)
-        check("so luong trong settings cung 10", w1.settings.concurrency, 10)
+        check("so luong mac dinh la 10", w1.settings.concurrency, 10)
+        check("retry mac dinh la 1", w1.settings.retries, 1)
+        cfg = w1._collect_cfg()
+        check("app lay so luong tu settings", cfg.concurrency, 10)
+        check("app lay so lan thu lai tu settings", cfg.retries, 1)
+        check("app lay do loi tu settings",
+              (cfg.delay_min, cfg.delay_max), (0.0, 1.0))
 
-        print("\n=== 2. Nguoi dung doi tham so ===")
-        w1.sp_threads.setValue(15)
-        w1.sp_retry.setValue(3)
-        w1.sp_dmin.setValue(0.5)
-        w1.sp_dmax.setValue(2.5)
+        print("\n=== 2. Tham so duoc ghi xuong dia ngay ===")
+        w1.settings.concurrency = 15
+        w1.settings.retries = 3
+        w1.settings.delay_min = 0.5
+        w1.settings.delay_max = 2.5
+        w1._save_settings_quiet()
         w1.sp_pick.setValue(60)
         w1.rb_pick_random.setChecked(True)
         spin(250)
-        check("spinbox hien 15 luong", w1.sp_threads.value(), 15)
         check("settings.concurrency da doi ngay (khong can bam CHAY)",
               w1.settings.concurrency, 15)
         on_disk = json.loads(path.read_text(encoding="utf-8"))
@@ -106,21 +120,20 @@ def main():
         print("\n=== 4. MO LAI APP — phai doc lai dung gia tri da luu ===")
         w2 = MainWindow()
         spin()
-        check("so luong = 15", w2.sp_threads.value(), 15)
-        check("retry = 3", w2.sp_retry.value(), 3)
-        check("tre 0.5 - 2.5 s",
-              (w2.sp_dmin.value(), w2.sp_dmax.value()), (0.5, 2.5))
+        cfg = w2._collect_cfg()
+        check("so luong = 15", cfg.concurrency, 15)
+        check("retry = 3", cfg.retries, 3)
+        check("tre 0.5 - 2.5 s", (cfg.delay_min, cfg.delay_max), (0.5, 2.5))
         check("so profile = 60", w2.sp_pick.value(), 60)
         check("cach chon = random", w2._pick_how(),
               AccountTableModel.PICK_RANDOM)
 
         print("\n=== 5. Bat buoc: dong app khong duoc LAM mat gia tri ===")
-        # Day la loi goc: closeEvent goi _sync_to_settings() cua tab Cai
-        # dat, lay o so luong cu (mac dinh 10) roi ghi de.
         w3 = MainWindow()
         spin()
-        w3.sp_threads.setValue(42)
-        w3.sp_retry.setValue(5)
+        w3.settings.concurrency = 42
+        w3.settings.retries = 5
+        w3._save_settings_quiet()
         spin(200)
         w3.close()
         spin(200)
@@ -132,15 +145,24 @@ def main():
 
         w4 = MainWindow()
         spin()
-        check("mo lai thay 42 luong", w4.sp_threads.value(), 42)
-        check("mo lai thay 5 retry", w4.sp_retry.value(), 5)
+        cfg = w4._collect_cfg()
+        check("mo lai thay 42 luong", cfg.concurrency, 42)
+        check("mo lai thay 5 retry", cfg.retries, 5)
         w4.close()
         spin(150)
         del w4
 
-        print("\n=== 6. Khong co o SO LUONG trung lap o tab Cai dat ===")
+        print("\n=== 6. Cac o da bi bo khoi UI ===")
         w5 = MainWindow()
         spin()
+        for attr in ("sp_threads", "sp_retry", "sp_dmin", "sp_dmax",
+                     "cb_verify", "cb_pool", "in_proxy", "in_signer",
+                     "backend_kind", "btn_dry", "lbl_thread_hint"):
+            check(f"khong con '{attr}'", hasattr(w5, attr), False)
+        for attr in ("sp_conc", "sp_retry", "sp_dmin", "sp_dmax",
+                     "cb_verify", "in_signer"):
+            check(f"tab Cai dat khong con '{attr}'",
+                  hasattr(w5.tab_settings, attr), False)
         # Hai tab "Tác vụ" và "Chi tiết" đã bị bỏ; chỉ còn màn chính
         # + Cài đặt. Kiểm tra đúng những gì còn tồn tại.
         check("tab 'Chi tiết' da bi bo", hasattr(w5, "tab_detail"), False)
@@ -148,40 +170,20 @@ def main():
         check("van con tab man chinh", hasattr(w5, "tab_main"), True)
         check("van con tab Cai dat", hasattr(w5, "tab_settings"), True)
         check("chi con 2 tab", w5.tabs.count(), 2)
-        check("tab Cai dat khong hien o so luong",
-              w5.tab_settings.sp_conc.isVisible(), False)
-        w5.show()
-        for _ in range(4):
-            app.processEvents()
-        check("tab Tác vụ THÌ hien o so luong",
-              w5.sp_threads.isVisibleTo(w5), True)
-        w5.sp_threads.setValue(33)
-        spin(200)
-        check("o an cua tab Cai dat theo o dang hien",
-              w5.tab_settings.sp_conc.value(), 33)
-        w5.sp_retry.setValue(4)
-        spin(200)
-        check("o retry an cua tab Cai dat theo",
-              w5.tab_settings.sp_retry.value(), 4)
         w5.close()
         spin(150)
         del w5
 
-        print("\n=== 7. Goi y so luong theo may ===")
+        print("\n=== 7. Gia tri da luu duoc dung khi chay ===")
         w6 = MainWindow()
         spin()
-        sug = w6._suggest_threads()
-        check("goi y > 0", sug > 0, True)
-        check("goi y khong vuot qua tran 50", sug <= 50, True)
-        check("goi y it nhat 4", sug >= 4, True)
-        w6.sp_threads.setValue(sug)
-        spin(150)
-        check("dat dung goi y thi khong canh bao",
-              "⚠" in w6.lbl_thread_hint.text(), False)
-        w6.sp_threads.setValue(500)
-        spin(150)
-        check("vuot tran thi co canh bao",
-              "⚠" in w6.lbl_thread_hint.text(), True)
+        check("so luong van la 42 (khong bi ghi de)", w6.settings.concurrency, 42)
+        check("retry van la 5 (khong bi ghi de)", w6.settings.retries, 5)
+        cfg = w6._collect_cfg()
+        check("app van chay duoc (so luong >= 1)", cfg.concurrency >= 1, True)
+        check("so lan thu lai khong am", cfg.retries >= 0, True)
+        check("xac minh like luon bat", cfg.verify, True)
+        check("backend luon la http", w6.settings.backend_kind, "http")
         w6.close()
         spin(150)
         del w6

@@ -103,6 +103,29 @@ def load_accounts_cache(path: Path | None = None) -> list:
     return out
 
 
+def save_cookie_file_path(path: str, settings_path: Path | None = None) -> Path:
+    """Nhớ đường dẫn file cookie vừa nạp — ghi thẳng vào settings.json.
+
+    Ghi đè TRỰC TIẾP lên file cấu hình: đọc file cũ, đổi đúng key
+    `last_cookie_file`, ghi lại. Nhờ vậy đường dẫn được lưu NGAY lúc nạp
+    (không đợi đóng app, nên app bị tắt đột ngột vẫn nhớ), còn các cấu hình
+    khác trên đĩa giữ nguyên y như cũ.
+    """
+    p = Path(settings_path) if settings_path else default_path()
+    data: dict = {}
+    if p.exists():
+        try:
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                data = raw
+        except (OSError, ValueError):
+            data = {}
+    data["last_cookie_file"] = str(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return p
+
+
 @dataclass
 class AppSettings:
     # --- proxy ---
@@ -128,7 +151,6 @@ class AppSettings:
     timezone: str = "Asia/Bangkok"
     language: str = ""            # để trống = tự đoán từ cookie
     signer_url: str = "http://127.0.0.1:8080"
-    verify: bool = True
     rotate_on_block: bool = True
     check_timeout: float = 15.0     # thời gian chờ khi kiểm tra tài khoản
 

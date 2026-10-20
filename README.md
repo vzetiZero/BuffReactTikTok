@@ -123,7 +123,7 @@ Trong app:
 2. Bấm **📂 Nạp cookie** → chọn `cokie.tik.txt`.
 3. (Tùy chọn) Chuột phải vào bảng → **Dọn nhanh** để loại tài khoản hỏng.
 4. Dán danh sách `cid` vào ô **Danh sách cid** ở tab **Tác vụ**.
-5. Tick tài khoản → đặt **Số luồng** → bấm **▶ CHẠY**.
+5. Tick tài khoản → bấm **▶ CHẠY**.
 
 ### Cài xong thì những lần sau
 
@@ -203,13 +203,20 @@ mới để tải lại. `.venv/` cũng không nằm trong git — chạy `insta
 
    > **Xác minh tim thật (quan trọng).** `status_code=0` chỉ là TikTok *nhận
    > lệnh*, không phải tim đã vào. App đọc lại comment và chỉ báo **Thành công**
-   > khi `user_digged=1` (kèm mức like tăng). Đo thực tế trên TikTok (10/2026):
-   > tim **comment gốc** dính ngay; tim **reply** bị TikTok bỏ qua lặng lẽ dù
-   > request hợp lệ — kể cả khi thả bằng Chrome thật có đủ `X-Dynosaur`,
-   > ticket-guard, `X-Bogus=1`. Khi đó app ghi **Lỗi · TikTok nhận lệnh nhưng
-   > KHÔNG ghi nhận tim** thay vì báo thành công ảo.
+   > khi `user_digged=1` (kèm mức like tăng). Nếu lần đọc đầu chưa kịp cập
+   > nhật (danh sách bình luận của TikTok cache vài giây), app đọc lại lần 2
+   > sau 1,5 giây rồi mới kết luận.
+   >
+   > **Thả tim cho REPLY cũng dính** — đo thật 19/10/2026 trên video
+   > `7690908625404955910`: `cid` của reply + `digg_type=1` → `user_digged`
+   > 0→1, số like tăng. Lỗi "tim reply không tăng" trước đây KHÔNG nằm ở
+   > request mà ở bước **xác minh**: mỗi account tự quét cây bình luận để
+   > tìm reply (mỗi bình luận cha 1 request) → hàng nghìn request ra 1 IP
+   > → TikTok chặn IP → không account nào thả tim được. Nay bộ định vị
+   > (`LOCATOR`) nhớ vị trí và **dùng chung cho mọi account**: mỗi account
+   > chỉ tốn 4 request, y như comment gốc. Xem `docs/QUY-TRINH.md` mục 3.0.
 
-5. Đặt **Số luồng**, rồi bấm **▶ CHẠY**. Backend mặc định là **http** để gửi
+5. Bấm **▶ CHẠY**. Backend mặc định là **http** để gửi
    request thật. Các tài khoản được đưa vào hàng đợi chung; worker nào xong
    trước sẽ nhận tài khoản kế tiếp ngay, không phải chờ đủ cả nhóm luồng.
    Khi đang chạy, bộ đếm hiển thị số đã xong, đang xử lý và còn chờ.
@@ -221,8 +228,9 @@ Bảng gồm 3 cột: **A** = thông tin tài khoản, **B** = kết quả lần
 
 ## 💡 Bao nhiêu luồng?
 
-Nút **Số luồng** = số request TikTok chạy song song. Tăng dần tới khi đồng hồ tốc
-độ **không tăng thêm nữa** — đó là chỗ trần thật của bạn.
+Số luồng = số request TikTok chạy song song. Không còn ô trên giao diện —
+đặt trong `settings.json` (khóa `concurrency`, mặc định 10). Tăng dần tới khi
+đồng hồ tốc độ **không tăng thêm nữa** — đó là chỗ trần thật của bạn.
 
 | Máy | Gợi ý |
 |---|---|
@@ -361,9 +369,10 @@ Nếu cả 4 đều trống thì báo rõ và chạy bằng IP máy. Có thể s
 
 ### Tự động đổi proxy
 
-Ở tab Tài khoản có ô **Dùng proxy gán ở tab Cài đặt**. Khi TikTok trả mã lỗi liên
-quan IP (`8`, `10202`, `10221`, `10222`, `350002`), app đổi sang proxy kế tiếp rồi thử lại
-— tối đa số lần bạn đặt ở *Thử lại*.
+Proxy gán ở tab **Cài đặt** luôn được dùng (không còn ô bật/tắt ở tab Tác vụ).
+Khi TikTok trả mã lỗi liên quan IP (`8`, `10202`, `10221`, `10222`, `350002`),
+app đổi sang proxy kế tiếp rồi thử lại — số lần thử lại đặt trong
+`settings.json` (khóa `retries`).
 
 Cấu hình (kể cả mật khẩu proxy) tự lưu khi đóng app.
 
@@ -393,8 +402,9 @@ Với mỗi account 2 chữ ký:
 | 500 | ~85 giây |
 | 5000 | ~14 phút |
 
-Muốn nhanh hơn: tắt *Xác minh số like*, bỏ bước kiểm tra đăng nhập, hoặc chạy
-2–3 sidecar ở các cổng khác nhau.
+Muốn nhanh hơn: bỏ bước kiểm tra đăng nhập, hoặc chạy 2–3 sidecar ở các cổng
+khác nhau. (Bước xác minh số like thì luôn bật — đó là thứ phân biệt "thả tim
+thật" với "app báo thành công ảo", và giờ chỉ tốn 1 request/account.)
 
 Nút thắt thật sự là **IP**, không phải thread — nhiều account trên một IP dễ bị TikTok
 phát hiện. Xem tab Cài đặt.
@@ -432,7 +442,7 @@ core/
     http_backend.py        tác vụ thật
     mock_backend.py        giả lập, chỉ dùng trong test tự động
 ui/
-  main_window.py           tab Quản lý + Tác vụ
+  main_window.py           màn hình chính (bảng + ô cid + nhật ký)
   settings_tab.py          tab Cài đặt (proxy, cổng VPN Express, cấu hình)
   detail_panel.py          thẻ bài viết + thẻ tài khoản
   delegates.py             vẽ 2 cột + ô tick
@@ -443,6 +453,9 @@ test_search.py             test tìm kiếm/lọc/sắp xếp/phân trang (37 ki
 test_paging.py             test phân trang (23 kiểm tra)
 test_proxy.py              test lớp proxy (25 kiểm tra)
 test_digg_url.py           so 27 tham số với request thật
+test_comment_locator.py    test bộ định vị comment dùng chung (14 kiểm tra, offline)
+test_cookie_path.py        test nhớ đường dẫn file cookie (13 kiểm tra)
+test_reply_like.py         CHẨN ĐOÁN THẢ TIM REPLY — cần mạng + sidecar + proxy
 cokie.tik.txt              dữ liệu của bạn (đừng commit)
 ```
 

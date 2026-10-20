@@ -248,7 +248,12 @@ class SidecarPool:
         """Dừng toàn bộ và xoá file tạm. Gọi lại nhiều lần vẫn an toàn."""
         with self._lock:
             self._closed = True
-        self.reset()
+        try:
+            self.reset()
+        except (RuntimeError, OSError):
+            # Lúc interpreter đang tắt thì có thể ném (không tạo được
+            # thread nữa); bỏ qua, chỉ cần không để lại Chrome chiếm RAM.
+            pass
         shutil.rmtree(self._tmp_root, ignore_errors=True)
 
     def count(self) -> int:
@@ -366,16 +371,21 @@ class SidecarPool:
         if proc is not None and proc.poll() is None:
             if os.name == "nt":
                 try:
+                    # KHÔNG dùng capture_output=True: nó tạo thread đọc
+                    # stdout/stderr, mà lúc interpreter đang tắt thì không
+                    # tạo được thread nữa -> RuntimeError -> quên dọn
+                    # Chrome, sidecar sót lại và chiếm RAM.
                     subprocess.run(
                         ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                        capture_output=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
                         creationflags=subprocess.CREATE_NO_WINDOW,
                         timeout=15,
                     )
-                except (OSError, subprocess.SubprocessError):
+                except (OSError, subprocess.SubprocessError, RuntimeError):
                     try:
                         proc.kill()
-                    except OSError:
+                    except (OSError, RuntimeError):
                         pass
             else:
                 try:

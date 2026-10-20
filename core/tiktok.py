@@ -23,6 +23,7 @@ from curl_cffi import requests as cf
 
 from .inflight import HTTP, REST, SIGN, tracker
 from .models import Account
+from .proxy import proxy_url
 from .signer import Signer, SignerError
 
 # Endpoint (để ở đây để dễ đổi nếu TikTok đổi path)
@@ -59,6 +60,120 @@ DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+
+
+# --------------------------------------------------------------------------- #
+# Định vị comment — dùng CHUNG cho mọi account
+# --------------------------------------------------------------------------- #
+#
+# Bối cảnh (vì sao phải có):
+#
+#   Xác minh thả tim cần biết 1 cid nằm ở đâu trong cây bình luận.
+#   - Bình luận GỐC: đọc `/api/comment/list/` là xong -> 1 request.
+#   - REPLY: phải biết cid CHA của nó, mà muốn biết thì phải quét từng
+#     bình luận cha, mỗi cha 1 request `/api/comment/list/reply/`.
+#     Một video có 20 bình luận có reply là 20 request cho MỘT lần xác minh.
+#
+#   Trước đây mỗi account tự quét lại từ đầu. 700 account cùng thả tim 1
+#   reply = 700 × 20 = 14.000 request đi ra cùng 1 IP → TikTok chặn IP,
+#   và account nào cũng không thả tim được (đúng triệu chứng: thả tim cho
+#   comment gốc được, thả tim cho reply thì không tăng).
+#
+#   Nay: CHỈ 1 luồng quét thật, các luồng khác chờ rồi dùng kết quả.
+#   Sau lần quét đầu, mỗi account chỉ còn 1 request xác minh.
+
+
+class CommentLocator:
+    """Nhớ vị trí của 1 cid trong cây bình luận, và chỉ cho quét 1 lần.
+
+    Vị trí ghi dạng ("kind", "where"):
+      ("top",   "<cursor>", "")  — bình luận gốc, nằm ở trang `cursor`
+      ("reply", "<cid cha>", "<cursor trang reply>") — reply của bình luận cha
+    """
+
+    # Không tìm thấy thì nhớ "không có" một lúc lâu, để 700 account không
+    # cùng quét lại 1 cid vô ích. Hết hạn thì cho quét lại (có thể lúc nãy
+    # bình luận chưa hiện, giờ hiện rồi).
+    MISS_TTL = 300.0
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._hits: dict[tuple[str, str], tuple[str, str]] = {}
+        self._locks: dict[tuple[str, str], threading.Lock] = {}
+        self._miss: dict[tuple[str, str], float] = {}
+        # tìm theo từ khoá -> cid (dùng cho chế độ "tìm reply theo từ khoá")
+        self._search_hits: dict[tuple[str, str], str] = {}
+        self._search_locks: dict[tuple[str, str], threading.Lock] = {}
+        self._search_miss: dict[tuple[str, str], float] = {}
+
+    # ------------------------------------------------------------------ #
+    def resolve(self, aweme_id: str, cid: str, scan):
+        """Trả vị trí của cid. `scan()` chỉ được gọi 1 lần cho mỗi cid.
+
+        `scan()` trả ("kind", "where") hoặc None nếu không tìm thấy.
+        """
+        key = (str(aweme_id), str(cid))
+        with self._lock:
+            hit = self._hits.get(key)
+            if hit is not None:
+                return hit
+            ts = self._miss.get(key)
+            if ts is not None and (time.time() - ts) < self.MISS_TTL:
+                return None
+            lk = self._locks.setdefault(key, threading.Lock())
+        with lk:
+            with self._lock:
+                hit = self._hits.get(key)
+                if hit is not None:
+                    return hit
+                ts = self._miss.get(key)
+                if ts is not None and (time.time() - ts) < self.MISS_TTL:
+                    return None
+            hit = scan()
+            with self._lock:
+                if hit is None:
+                    self._miss[key] = time.time()
+                else:
+                    self._hits[key] = hit
+            return hit
+
+    def remember(self, aweme_id: str, cid: str, kind: str, where: str,
+                 sub: str = "") -> None:
+        """Ghi vị trí biết trước (dùng khi vừa quét xong)."""
+        with self._lock:
+            self._hits[(str(aweme_id), str(cid))] = (kind, str(where), str(sub))
+
+    # ------------------------------------------------------------------ #
+    def resolve_search(self, aweme_id: str, needle: str, scan) -> str:
+        """Trả cid tìm được theo từ khoá. `scan()` chỉ chạy 1 lần."""
+        key = (str(aweme_id), needle.strip().lower())
+        with self._lock:
+            hit = self._search_hits.get(key)
+            if hit is not None:
+                return hit
+            ts = self._search_miss.get(key)
+            if ts is not None and (time.time() - ts) < self.MISS_TTL:
+                return ""
+            lk = self._search_locks.setdefault(key, threading.Lock())
+        with lk:
+            with self._lock:
+                hit = self._search_hits.get(key)
+                if hit is not None:
+                    return hit
+                ts = self._search_miss.get(key)
+                if ts is not None and (time.time() - ts) < self.MISS_TTL:
+                    return ""
+            cid = scan() or ""
+            with self._lock:
+                if cid:
+                    self._search_hits[key] = cid
+                else:
+                    self._search_miss[key] = time.time()
+            return cid
+
+
+# Một bộ định vị cho CẢ ứng dụng (mọi account dùng chung).
+LOCATOR = CommentLocator()
 
 # Nhận dạng nền tảng, suy ra từ User-Agent của sidecar.
 PLATFORMS = {
@@ -219,8 +334,12 @@ class TikTokClient:
         self._impersonate = ""
         self._proxies = None
         if proxy:
-            p = proxy if "://" in proxy else f"http://{proxy}"
-            self._proxies = {"http": p, "https": p}
+            # PHẢI chuẩn hoá qua proxy_url(): chuỗi "IP:port:user:pass"
+            # (kiểu VPN Express) đưa thẳng vào curl sẽ lỗi "Unsupported
+            # proxy syntax" và mọi request đều chết.
+            p = proxy_url(proxy)
+            if p:
+                self._proxies = {"http": p, "https": p}
         self._sync_fingerprint()
         self._ensure_session()
 
@@ -588,57 +707,173 @@ class TikTokClient:
                      max_pages: int = 2, only_replies: bool = True) -> dict | None:
         """Định vị 1 cid trong bình luận, để đọc `digg_count` xác minh.
 
-        `only_replies=True` (mặc định): quét các bình luận CÓ REPLY trước. Một cid
-        bạn muốn thả tim thường là reply lồng nhau, nằm ở cấp 2 — tìm thấy
-        nhanh hơn nhiều so với quét tuần tự từ đầu.
+        Dùng chung bộ định vị (`LOCATOR`) nên lần đầu phải quét, còn các
+        account sau chỉ tốn 1 request. Xem `CommentLocator` để hiểu vì sao
+        phải chia sẻ kết quả quét giữa các account.
         """
-        target = str(comment_id)
+        return self.comment_state(aweme_id, comment_id, max_pages)
+
+    # ------------------------------------------------------------------ #
+    def _scan_for_cid(self, aweme_id: str, cid: str,
+                      max_pages: int = 2) -> tuple[dict | None,
+                                                 tuple[str, str, str] | None]:
+        """Quét cây bình luận tìm cid — chỉ chạy 1 lần cho mỗi cid.
+
+        Trả (item, vị trí). Vị trí = ("top", "<cursor>", "") nếu cid là bình
+        luận gốc, ("reply", "<cid cha>", "<cursor trang reply>") nếu là reply.
+        """
+        target = str(cid)
         cursor = 0
         for _ in range(max_pages):
             data = self.comment_list(aweme_id, cursor=cursor, count=50)
             items = data.get("comments") or []
             for c in items:
                 if str(c.get("cid")) == target:
-                    return c
+                    return c, ("top", str(cursor), "")
+                # TikTok trả kèm vài reply đầu của mỗi bình luận ngay
+                # trong payload -> thấy là khỏi gọi thêm request.
+                for rep in c.get("reply_comment") or []:
+                    if str(rep.get("cid")) == target:
+                        return rep, ("reply", str(c.get("cid")), "0")
             for c in items:
                 if not _has_replies(c):
                     continue
-                try:
-                    rdata = self.comment_replies(aweme_id, str(c.get("cid")), 0, 20)
-                except TikTokError:
-                    continue
-                for rep in rdata.get("comments") or []:
-                    if str(rep.get("cid")) == target:
-                        return rep
+                rep, rep_cursor = self._find_in_replies(
+                    aweme_id, str(c.get("cid")), target)
+                if rep is not None:
+                    return rep, ("reply", str(c.get("cid")), str(rep_cursor))
             if not data.get("has_more") or not items:
                 break
             cursor = data.get("cursor", cursor + len(items))
+        return None, None
+
+    def _find_in_replies(self, aweme_id: str, parent_cid: str, target: str,
+                         max_reply_pages: int = 4) -> tuple[dict | None, int]:
+        """Quét các trang reply của 1 bình luận cha.
+
+        Một bình luận có thể có hàng trăm reply (chia nhiều trang). Reply
+        nằm ở trang 2 trở đi sẽ không thấy nếu chỉ đọc trang đầu.
+        """
+        cursor = 0
+        for _ in range(max_reply_pages):
+            try:
+                data = self.comment_replies(aweme_id, parent_cid, cursor, 50)
+            except TikTokError:
+                return None, cursor
+            reps = data.get("comments") or []
+            for rep in reps:
+                if str(rep.get("cid")) == target:
+                    return rep, cursor
+            if not data.get("has_more") or not reps:
+                break
+            cursor = data.get("cursor", cursor + len(reps))
+        return None, cursor
+
+    def comment_state(self, aweme_id: str, comment_id: str,
+                      max_pages: int = 2, fresh: bool = False) -> dict | None:
+        """Đọc trạng thái 1 cid (`user_digged` + `digg_count`) — RẺ nhất có thể.
+
+        Lần đầu phải quét để biết cid nằm ở đâu; kết quả được nhớ dùng
+        chung cho mọi account, nên từ account thứ 2 trở đi chỉ tốn ĐÚNG
+        1 request. Trước đây mỗi account tự quét lại từ đầu, với reply
+        là hàng chục request — đủ để TikTok chặn IP và không account nào
+        thả tim được.
+
+        `fresh=True`: đổi tham số `count` để URL khác đi. Nếu TikTok cache
+        payload của `/api/comment/list/reply/` theo URL (mọi account dùng
+        chung 1 URL vì cookie không nằm trong URL) thì đọc lại sẽ thấy
+        trạng thái CŨ — `user_digged=0` dù tim đã lên.
+        """
+        scanned: dict = {}
+
+        def scan():
+            item, hit = self._scan_for_cid(aweme_id, comment_id, max_pages)
+            if hit is not None:
+                scanned["item"] = item
+            return hit
+
+        hit = LOCATOR.resolve(aweme_id, comment_id, scan)
+        if hit is None:
+            return None
+        # Chính lượt này quét thì dùng luôn item tìm được (tiết kiệm 1
+        # request); account sau thì đọc đúng chỗ đã biết (1 request).
+        if "item" in scanned and not fresh:
+            return scanned["item"]
+        kind, where, sub = hit
+        count = 50 + (1 if fresh else 0)
+        try:
+            if kind == "reply":
+                data = self.comment_replies(aweme_id, where, int(sub or 0), count)
+            else:
+                data = self.comment_list(aweme_id, cursor=int(where), count=count)
+        except TikTokError:
+            return None
+        for it in data.get("comments") or []:
+            if str(it.get("cid")) == str(comment_id):
+                return it
+        return None
+        # Chính lượt này quét thì dùng luôn item tìm được (tiết kiệm 1
+        # request); account sau thì đọc đúng chỗ đã biết (1 request).
+        if "item" in scanned:
+            return scanned["item"]
+        kind, where = hit
+        try:
+            if kind == "reply":
+                data = self.comment_replies(aweme_id, where, 0, 50)
+            else:
+                data = self.comment_list(aweme_id, cursor=int(where), count=50)
+        except TikTokError:
+            return None
+        for it in data.get("comments") or []:
+            if str(it.get("cid")) == str(comment_id):
+                return it
         return None
 
     def search_comment(self, aweme_id: str, needle: str,
                        max_pages: int = 4) -> dict | None:
-        """Quét bình luận cấp 1 và các reply để tìm comment chứa `needle`."""
+        """Quét bình luận cấp 1 và các reply để tìm comment chứa `needle`.
+
+        Kết quả tìm được nhớ dùng chung: mọi account đều tìm CÙNG một
+        comment, quét lại 700 lần là tự tạo hàng nghìn request vô ích.
+        """
         low = needle.strip().lower()
+        cid = LOCATOR.resolve_search(
+            aweme_id, low,
+            lambda: self._scan_for_needle(aweme_id, low, max_pages),
+        )
+        if not cid:
+            return None
+        item = self.comment_state(aweme_id, cid, max_pages)
+        return item if item else {"cid": cid}
+
+    def _scan_for_needle(self, aweme_id: str, low: str,
+                         max_pages: int = 4) -> str:
+        """Quét tìm comment chứa `low`; trả cid + nhớ vị trí để đọc lại."""
         cursor = 0
-        for page in range(max_pages):
+        for _page in range(max_pages):
             data = self.comment_list(aweme_id, cursor=cursor, count=50)
             items = data.get("comments") or []
             for c in items:
                 if low in (c.get("text") or "").lower():
-                    return c
+                    LOCATOR.remember(aweme_id, str(c.get("cid")), "top",
+                                     str(cursor), "")
+                    return str(c.get("cid"))
                 if not _has_replies(c):
                     continue
                 try:
-                    rdata = self.comment_replies(aweme_id, str(c.get("cid")), 0, 30)
+                    rdata = self.comment_replies(aweme_id, str(c.get("cid")),
+                                                 0, 50)
                 except TikTokError:
                     continue
                 for rep in rdata.get("comments") or []:
                     if low in (rep.get("text") or "").lower():
-                        return rep
+                        LOCATOR.remember(aweme_id, str(rep.get("cid")),
+                                         "reply", str(c.get("cid")), "0")
+                        return str(rep.get("cid"))
             if not data.get("has_more") or not items:
                 break
             cursor = data.get("cursor", cursor + len(items))
-        return None
+        return ""
 
     def publish_comment(self, aweme_id: str, text: str,
                         parent_cid: str = "") -> dict:

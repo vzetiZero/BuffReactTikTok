@@ -35,6 +35,7 @@ from .models import (
     HC_RISKY,
     Account,
 )
+from .proxy import proxy_url
 
 # Mã TikTok nói "phiên đăng nhập không còn hiệu lực" — tín hiệu CHẮC CHẮN
 # cookie hỏng, khác hẳn với bị chặn.
@@ -55,7 +56,7 @@ class HealthTask(QRunnable):
     def __init__(self, account: Account, sig: HealthSignals, region: str,
                  timezone: str, proxy: str, timeout: float = 15.0,
                  signer_url: str = "http://127.0.0.1:8080",
-                 local_only: bool = False):
+                 local_only: bool = False, signer=None):
         super().__init__()
         self.account = account
         self.sig = sig
@@ -65,6 +66,10 @@ class HealthTask(QRunnable):
         self.timeout = timeout
         self.signer_url = signer_url
         self.local_only = local_only
+        # Signer ĐÚNG IP với proxy: sidecar tạo chữ ký từ IP của nó, mà
+        # request đi qua proxy → lệch IP thì TikTok trả body rỗng. Với
+        # proxy thì phải dùng sidecar riêng của proxy đó.
+        self.signer = signer
         self.setAutoDelete(True)
 
     @Slot()
@@ -96,8 +101,9 @@ class HealthTask(QRunnable):
         from .tiktok import TikTokClient, TikTokError
 
         try:
+            signer = self.signer or Signer(self.signer_url)
             client = TikTokClient(
-                acc, Signer(self.signer_url), region=self.region,
+                acc, signer, region=self.region,
                 timezone=self.timezone, proxy=self.proxy,
                 timeout=self.timeout, language="en",
             )
@@ -140,7 +146,8 @@ class HealthChecker(QObject):
 
     POLL_MS = 80
 
-    def __init__(self, settings, pool: QThreadPool | None = None, parent=None):
+    def __init__(self, settings, pool: QThreadPool | None = None, parent=None,
+                 signer_pool=None):
         super().__init__(parent)
         self._settings = settings
         self._pool = pool or QThreadPool(self)
@@ -151,6 +158,8 @@ class HealthChecker(QObject):
         self._total = 0
         self._running = False
         self._lock = threading.Lock()
+        # Bộ sidecar theo proxy — dùng chung với luồng thả tim.
+        self._signer_pool = signer_pool
 
         self._timer = QTimer(self)
         self._timer.setInterval(self.POLL_MS)
@@ -173,10 +182,21 @@ class HealthChecker(QObject):
         for acc in accounts:
             proxy = ""
             if use_proxy:
-                proxy = acc.proxy or getattr(s, "system_proxy", "")
+                # proxy hệ thống trong settings có thể ở dạng
+                # "IP:port:user:pass" — phải chuẩn hoá trước, nếu không
+                # curl báo "Unsupported proxy syntax".
+                proxy = proxy_url(acc.proxy or getattr(s, "system_proxy", ""))
+            signer = None
+            if proxy and self._signer_pool is not None:
+                # Sidecar phải CÙNG IP với proxy, nếu không TikTok trả
+                # body rỗng và mọi tài khoản bị báo "rủi ro" giả.
+                try:
+                    signer = self._signer_pool.signer_for(proxy)
+                except Exception:
+                    signer = None
             self._pool.start(HealthTask(
                 acc, self._sig, s.region, s.timezone, proxy, s.check_timeout,
-                s.signer_url, local_only,
+                s.signer_url, local_only, signer=signer,
             ))
 
     def stop(self) -> None:
